@@ -135,6 +135,13 @@ class ChapterItem:
     name: str
     url: str = "#"
 
+@dataclass
+class SubChapterItem:
+    """Sub-chapter letter-head from <p class="act-section-head">, e.g. 'A.-Classes of Criminal Courts'."""
+    letter: str          # "A", "B", etc.
+    subtitle: str        # "Classes of Criminal Courts", "Territorial Divisions", etc.
+    parent_number: str   # last section number seen before this head, e.g. "6"
+    url: str = "#"
 
 @dataclass
 class PartItem:
@@ -155,7 +162,7 @@ class FootnotesItem:
 
 
 # Union type for document tree nodes
-DocNode = PartItem | ChapterItem | SectionItem | PreambleItem | FootnotesItem
+DocNode = PartItem | ChapterItem | SubChapterItem | SectionItem | PreambleItem | FootnotesItem
 
 
 # ---------------------------------------------------------------------------
@@ -400,13 +407,14 @@ def parse_preamble(soup: BeautifulSoup) -> str:
         while j < len(lines) and not lines[j]:
             j += 1
         next_line = lines[j] if j < len(lines) else ""
-        if (
-            line
-            and not re.search(r"[.;:!?]$", line)
-            and next_line
-            and next_line[0].islower()
-        ):
-            joined.append(line + " " + next_line)
+        # NEW
+        is_continuation = bool(next_line) and (
+            next_line[0] in ";,)"
+            or (not re.search(r"[.;:!?]$", line) and next_line[0].islower())
+        )
+        if line and is_continuation:
+            sep = "" if next_line[0] in ";,)" else " "
+            joined.append(line + sep + next_line)
             i = j + 1
         else:
             joined.append(line)
@@ -430,6 +438,8 @@ def parse_detail(soup: BeautifulSoup, base: str) -> Generator[DocNode, None, Non
     container = soup.find("section", class_="padding-bottom-20 bg-striped")
     if not container:
         raise ValueError("Detail page: cannot find main container")
+
+    last_section_num: str = ""
 
     for row in container.find_all("div", class_="row", recursive=False):
         # ── PART ──────────────────────────────────────────────────────────────
@@ -457,28 +467,50 @@ def parse_detail(soup: BeautifulSoup, base: str) -> Generator[DocNode, None, Non
         # Same reasoning: a chapter row may contain the chapter's first section.
         chapter_group = row.find("div", class_="act-chapter-group")
         if chapter_group:
-            chap_p = row.find("p", class_="act-chapter-no")
-            if chap_p:
-                yield ChapterItem(name=_normalise(chap_p.get_text(strip=True)))
+            chap_no_p   = row.find("p", class_="act-chapter-no")
+            chap_name_p = row.find("p", class_="act-chapter-name")
+            if chap_no_p:
+                chap_no   = _normalise(chap_no_p.get_text(strip=True))
+                chap_name = _normalise(chap_name_p.get_text(strip=True)) if chap_name_p else ""
+                full_chap = f"{chap_no}: {chap_name}" if chap_name else chap_no
+                yield ChapterItem(name=full_chap)
             # NO continue.
 
-        # ── SECTION ───────────────────────────────────────────────────────────
+        # ── SUB-CHAPTER HEAD  (A.-Classes of Criminal Courts, etc.) ──────────
+        # BDLaw uses <p class="act-section-head"> for lettered sub-headings
+        # within a chapter.  They may share the row with the first section
+        # they introduce, so we scan rather than using find_all with recursive=False.
+        # ── SUB-CHAPTER HEAD ─────────────────────────────────────────────────
+        for sec_head in row.find_all("p", class_="act-section-head"):
+            raw = _normalise(
+                " ".join(sec_head.get_text(separator=" ", strip=True).split())
+            )
+            m = RE_SUBCHAPTER_HEAD.match(raw)
+            if m:
+                yield SubChapterItem(
+                    letter=m.group(1),
+                    subtitle=m.group(2).strip(),
+                    parent_number=last_section_num,
+                )
+            elif raw:
+                # Fallback for unexpected formats: emit as-is with no letter
+                yield SubChapterItem(letter="", subtitle=raw, parent_number=last_section_num)
+
+        # ── SECTION ──────────────────────────────────────────────────────────
         head_div    = row.find("div", class_="txt-head")
         details_div = row.find("div", class_="txt-details")
 
         if details_div:
             if head_div:
-                # Normal case: both heading and body present.
                 heading = _normalise(
                     " ".join(head_div.get_text(separator=" ", strip=True).split())
                 )
             else:
-                # Some rows (txt-details only) carry preamble or short sections
-                # with no heading div.  Section number from body becomes the key.
                 heading = ""
             raw_text = _get_text(details_div)
             number   = extract_section_number(raw_text)
-            # Skip boilerplate-only bodies (act preamble / CONTENTS blocks).
+            if number:
+                last_section_num = number   # ← UPDATE TRACKER
             if not _is_boilerplate(raw_text):
                 yield SectionItem(heading=heading, url="#", html=details_div, number=number)
 
@@ -547,6 +579,65 @@ def _strip_outer_brackets(text: str) -> str:
         text = text[1:-1].strip()
     return text
 
+_RE_ISOLATED_LABEL = re.compile(r"^\(([a-zA-Z0-9]+)\)\s*$")
+
+def _join_isolated_labels(text: str) -> str:
+    """
+    Join an isolated list label "(N)" / "(a)" / "(i)" that sits on its own
+    line with the next non-blank line.  BDLaw sometimes emits:
+        (4)
+        A Metropolitan Area shall …
+    which must become:
+        (4) A Metropolitan Area shall …
+    so that convert_lists can recognise it as a list item.
+    """
+    lines = text.splitlines()
+    out: list[str] = []
+    i = 0
+    while i < len(lines):
+        if _RE_ISOLATED_LABEL.match(lines[i].strip()):
+            j = i + 1
+            while j < len(lines) and not lines[j].strip():
+                j += 1
+            if j < len(lines):
+                out.append(lines[i].strip() + " " + lines[j].strip())
+                i = j + 1
+                continue
+        out.append(lines[i])
+        i += 1
+    return "\n".join(out)
+
+def _join_continuation_lines(text: str) -> str:
+    """
+    Join a line with the next when the next starts with continuation
+    punctuation (; , )) — produced when an inline footnote number is
+    stripped from mid-sentence HTML, leaving the punctuation stranded on
+    a new line.  Also re-applies the lowercase-start heuristic so both
+    preamble and section-body text go through the same code path.
+    """
+    lines = text.splitlines()
+    out: list[str] = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        j = i + 1
+        while j < len(lines) and not lines[j].strip():
+            j += 1
+        next_line = lines[j].strip() if j < len(lines) else ""
+        if line.strip() and next_line:
+            if next_line[0] in ";,)":
+                # No space — punctuation glues directly onto the previous token
+                out.append(line.rstrip() + next_line)
+                i = j + 1
+                continue
+            if (not re.search(r"[.;:!?]$", line.strip())
+                    and next_line[0].islower()):
+                out.append(line.rstrip() + " " + next_line)
+                i = j + 1
+                continue
+        out.append(line)
+        i += 1
+    return "\n".join(out)
 
 # Patterns for boilerplate content that should be dropped entirely
 _RE_BOILERPLATE_LINE = re.compile(
@@ -557,7 +648,33 @@ _RE_BOILERPLATE_LINE = re.compile(
 )
 _RE_URL_ONLY   = re.compile(r"^\s*https?://\S+\s*$")
 _RE_TOC_LINK   = re.compile(r"^\s*\[.+?\]\(https?://")
+RE_SUBCHAPTER_HEAD = re.compile(r"^([A-Z])\.\s*-\s*(.+)$")
+# BDLaw wraps substituted single letters in [X] — e.g. [A] where 'A' replaced
+# 'the Dacca'.  Must be stripped BEFORE _RE_ANNOTATION_BRACKETS, otherwise
+# the non-greedy outer match consumes [X]'s closing ']' and leaves a dangling
+# '[X' in the group-1 replacement, orphaning the outer closing ']'.
+_RE_SUBST_LETTER = re.compile(r"\[([A-Z])\]")
 
+def _table_to_markdown(table: Tag) -> str:
+    """Convert HTML <table> → GFM Markdown table string."""
+    rows: list[list[str]] = []
+    for tr in table.find_all("tr"):
+        cells = [
+            " ".join(td.get_text(separator=" ", strip=True).split())
+            for td in tr.find_all(["td", "th"])
+        ]
+        if cells:
+            rows.append(cells)
+    if not rows:
+        return ""
+    col_count = max(len(r) for r in rows)
+    rows = [r + [""] * (col_count - len(r)) for r in rows]
+    sep = ["---"] * col_count
+    lines = [
+        "| " + " | ".join(rows[0]) + " |",
+        "| " + " | ".join(sep)     + " |",
+    ] + ["| " + " | ".join(r) + " |" for r in rows[1:]]
+    return "\n".join(lines)
 
 def _is_boilerplate(raw: str) -> bool:
     """
@@ -694,17 +811,23 @@ def convert_lists(text: str) -> str:
         if not items:
             continue
 
-        if len(items) == 1:
-            # Single item — emit as plain paragraph
+        if lt == "decimal":
+            # Always render with actual label numbers, even for a single clause.
+            # A lone "(3) text" must become "3. text", not plain prose — the number
+            # is substantive (it's the clause reference in the parent section).
+            for item_lines in items:
+                m = RE_DECIMAL_ITEM.match(item_lines[0].strip())
+                num = int(m.group(1)) if m else None
+                content = " ".join(
+                    [_extract_item_content(item_lines[0])]
+                    + [l.strip() for l in item_lines[1:] if l.strip()]
+                )
+                out.append(f"{num}. {content}" if num is not None else content)
+        elif len(items) == 1:
+            # Single alpha/roman item — no list wrapper needed, emit as plain prose.
             first = _extract_item_content(items[0][0])
             rest = items[0][1:]
             out.append("\n".join([first] + rest).strip())
-        elif lt == "decimal":
-            for idx, item_lines in enumerate(items, start=1):
-                content = " ".join(
-                    [_extract_item_content(item_lines[0])] + [l.strip() for l in item_lines[1:] if l.strip()]
-                )
-                out.append(f"{idx}. {content}")
         else:
             style = "lower-alpha" if lt == "alpha" else "lower-roman"
             html_parts = [f'<ol style="list-style-type: {style};">']
@@ -713,7 +836,6 @@ def convert_lists(text: str) -> str:
                     l for l in item_lines[1:]
                 ]
                 content = "\n".join(content_lines).strip()
-                # Escape any stray < > inside <li> for safety (except nested HTML lists)
                 html_parts.append(f"<li>{content}</li>")
             html_parts.append("</ol>")
             out.append("".join(html_parts))
@@ -723,13 +845,17 @@ def convert_lists(text: str) -> str:
 
 def html_to_markdown(details_div: Tag) -> str:
     """Full pipeline: HTML tag → clean Markdown string."""
+
+    for table in details_div.find_all("table"):
+        table.replace_with(_table_to_markdown(table) + "\n")
+
     raw = _get_text(details_div)
 
     # 1. Remove inline footnote markers e.g. [1], [**]
     raw = _strip_footnotes(raw)
 
     # 2. Collapse horizontal whitespace (preserve newlines)
-    raw = RE_WHITESPACE_COLLAPSE.sub(" ", raw)
+    raw = re.sub(r"[^\S\n]+", " ", raw)
 
     # 3. Remove lines that are *only* a bare integer (stray footnote number
     #    left by the <sup> element after its [N] sibling was stripped).
@@ -748,11 +874,20 @@ def html_to_markdown(details_div: Tag) -> str:
     # 5b. Remove stray URL-only lines and ToC link lines
     raw = _filter_stray_lines(raw)
 
-    # 5c. Strip inline annotation brackets [text] → text; keep [* * *]
-    #     Handles cases like "...means.]" where a [Inserted text] spans
-    #     to end of sentence but _strip_outer_brackets missed it because
-    #     the opening [ was not at the very start of the body text.
+    # 5c. Strip single-letter substitution markers [A], [B] … first, then
+    #     general annotation brackets.  Order matters: the letter markers
+    #     must go first or they poison the outer bracket match (see above).
+    raw = _RE_SUBST_LETTER.sub(r"\1", raw)
     raw = _RE_ANNOTATION_BRACKETS.sub(r"\1", raw)
+
+    # 5d. Strip orphan leading ". " before a clause marker.
+    #     BDLaw emits sub-clauses as ". (3) text" with no section-number
+    #     prefix when the heading and body are in separate HTML elements.
+    raw = re.sub(r"^\.\s+(?=\()", "", raw.lstrip())
+
+    # 5e. Join isolated clause labels with their following content line.
+    #     "(4)\nA Metropolitan Area …" → "(4) A Metropolitan Area …"
+    raw = _join_isolated_labels(raw)
 
     # 6. Convert list items to proper Markdown / HTML
     raw = convert_lists(raw)
@@ -793,19 +928,21 @@ def build_markdown(
             lines.append(f"\n## [{node.name}]({node.url})\n")
         elif isinstance(node, ChapterItem):
             lines.append(f"\n### [{node.name}]({node.url})\n")
+        elif isinstance(node, SubChapterItem):
+            if node.letter and node.parent_number:
+                heading_text = f"Section {node.parent_number}{node.letter}: {node.subtitle}"
+            else:
+                heading_text = node.subtitle
+            lines.append(f"\n#### [{heading_text}]({node.url})\n")
         elif isinstance(node, SectionItem):
             if node.number:
-                # BDLaw uses "/Article-" in URLs for the Constitution,
-                # "/section-" for every other act.  Detect after URL resolution.
                 term = "Article" if "/Article-" in node.url else "Section"
                 heading_text = f"{term} {node.number}: {node.heading}"
-                # Alphanumeric numbers (2A, 4A, 7B …) are inserted provisions —
-                # one heading level below their parent section.
                 is_inserted = any(c.isalpha() for c in node.number)
-                level = "#####" if is_inserted else "####"
+                level = "######" if is_inserted else "#####"  # was ##### / ####
             else:
                 heading_text = node.heading
-                level = "####"
+                level = "#####"  # was ####
             lines.append(f"\n{level} [{heading_text}]({node.url})\n")
             lines.append(html_to_markdown(node.html))
             lines.append("")
