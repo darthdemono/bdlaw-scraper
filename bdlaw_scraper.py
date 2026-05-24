@@ -148,8 +148,14 @@ class PreambleItem:
     text: str
 
 
+@dataclass
+class FootnotesItem:
+    """Footnote list from div.footnoteListAll, appended at end of document."""
+    notes: list[tuple[int, str]]
+
+
 # Union type for document tree nodes
-DocNode = PartItem | ChapterItem | SectionItem | PreambleItem
+DocNode = PartItem | ChapterItem | SectionItem | PreambleItem | FootnotesItem
 
 
 # ---------------------------------------------------------------------------
@@ -256,6 +262,38 @@ def extract_section_number(raw_text: str) -> Optional[str]:
     return None
 
 
+def parse_footnotes(soup: BeautifulSoup) -> Optional["FootnotesItem"]:
+    """
+    Extract numbered footnotes from div.footnoteListAll.
+    Each <li class="footnoteList"> contains <h6><sup>N</sup></h6> + text.
+    Returns None if no footnotes found.
+    """
+    container = soup.find("div", class_="footnoteListAll")
+    if not container:
+        return None
+    notes: list[tuple[int, str]] = []
+    for li in container.find_all("li", class_="footnoteList"):
+        sup = li.find("sup")
+        if not sup:
+            continue
+        try:
+            num = int(sup.get_text(strip=True))
+        except ValueError:
+            continue
+        # Collect text nodes that are NOT inside the h6 number heading
+        h6 = li.find("h6")
+        parts: list[str] = []
+        for node in li.children:
+            if hasattr(node, "name") and node.name == "h6":
+                continue
+            text = node.get_text() if hasattr(node, "get_text") else str(node)
+            parts.append(text)
+        text = _normalise(" ".join(" ".join(parts).split()))
+        if text:
+            notes.append((num, text))
+    return FootnotesItem(notes=notes) if notes else None
+
+
 def parse_toc(soup: BeautifulSoup, base: str) -> dict[str, str]:
     """
     Parse the normal (ToC) page and return {normalised_heading: url}.
@@ -306,7 +344,18 @@ def parse_preamble(soup: BeautifulSoup) -> str:
 
     Returns '' when no preamble div is found.
     """
+    # Primary: specific class used on both print and normal BDLaw pages
     preamble_div = soup.find("div", class_="preamble-content")
+
+    # Fallback: find <section class="padding-bottom-20"> that has no bg-striped
+    # and no bg-act-section (title) — the middle section is always the preamble
+    if not preamble_div:
+        for sec in soup.find_all("section", class_="padding-bottom-20"):
+            classes = sec.get("class", [])
+            if "bg-striped" not in classes and "bg-act-section" not in classes:
+                preamble_div = sec
+                break
+
     if not preamble_div:
         return ""
 
@@ -699,6 +748,12 @@ def html_to_markdown(details_div: Tag) -> str:
     # 5b. Remove stray URL-only lines and ToC link lines
     raw = _filter_stray_lines(raw)
 
+    # 5c. Strip inline annotation brackets [text] → text; keep [* * *]
+    #     Handles cases like "...means.]" where a [Inserted text] spans
+    #     to end of sentence but _strip_outer_brackets missed it because
+    #     the opening [ was not at the very start of the body text.
+    raw = _RE_ANNOTATION_BRACKETS.sub(r"\1", raw)
+
     # 6. Convert list items to proper Markdown / HTML
     raw = convert_lists(raw)
 
@@ -728,6 +783,11 @@ def build_markdown(
         if isinstance(node, PreambleItem):
             lines.append("")
             lines.append(node.text)
+            lines.append("")
+        elif isinstance(node, FootnotesItem):
+            lines.append("\n## Footnotes\n")
+            for num, text in node.notes:
+                lines.append(f"{num}. {text}")
             lines.append("")
         elif isinstance(node, PartItem):
             lines.append(f"\n## [{node.name}]({node.url})\n")
@@ -822,10 +882,14 @@ def scrape_act(
     act_url   = f"{BASE_URL}/act-{act_number}.html"
     if act_title:
         log.info("Act title: %s", act_title)
-    preamble = parse_preamble(toc_soup)  # preamble is on normal page, not print page
+    preamble = parse_preamble(detail_soup) or parse_preamble(toc_soup)
     if preamble:
         log.info("Preamble found (%d chars)", len(preamble))
         nodes.insert(0, PreambleItem(text=preamble))
+    footnotes = parse_footnotes(detail_soup)
+    if footnotes:
+        log.info("Found %d footnotes", len(footnotes.notes))
+        nodes.append(footnotes)
     md = build_markdown(nodes, act_number, act_title=act_title, act_url=act_url)
 
     output.write_text(md, encoding="utf-8")
