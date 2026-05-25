@@ -11,6 +11,8 @@ Improvements over v1:
   - Rich progress bar + structured logging
   - Strict HTML→Markdown pipeline with lxml parser for speed
   - Smarter list grouping: alpha / roman / decimal
+  - Bengali list support: (ক)(খ)(গ) → lower-alpha ol; (১)(২)(৩) → decimal
+  - Bengali section-number extraction (১৷, ২৷ danda style)
   - Section-number extraction handles all edge cases
   - Idempotent output: skips fetch if --cache dir present
   - Proper Unicode normalisation (handles BDLaw's mixed encoding)
@@ -19,6 +21,7 @@ Improvements over v1:
 
 Usage examples:
   python bdlaw_scraper.py --act 1710                        # CrPC
+  python bdlaw_scraper.py --act 927                         # Tobacco Control Act (Bengali)
   python bdlaw_scraper.py --act 1710 --output crpc.md
   python bdlaw_scraper.py --act 1710 --delay 0.5 --retries 5
   python bdlaw_scraper.py --act 1710 --cache-dir .cache --verbose
@@ -80,22 +83,72 @@ HEADERS = {
     "Accept-Language": "en-US,en;q=0.9",
 }
 
+# ---------------------------------------------------------------------------
+# Bengali support constants
+# ---------------------------------------------------------------------------
+
+# Map Bengali digits → ASCII digits for int() conversion
+BENGALI_DIGIT_MAP = str.maketrans("০১২৩৪৫৬৭৮৯", "0123456789")
+
+# Bengali consonants used as legal list markers (ক খ গ … and compound কক, কখ)
+# U+0995–U+09B9 covers the standard consonants; extras for common ligatures.
+_BN_CONS = "কখগঘঙচছজঝঞটঠডঢণতথদধনপফবভমযরলশষসহড়ঢ়য়ৎ"
+
+# Bengali vowels used as sub-list markers: (অ)(আ)(ই)(ঈ)(উ)(ঊ)
+# Appear in Section 10-style warning lists nested within (ক)(খ)(গ) items.
+_BN_VOWELS = "অআইঈউঊঋএঐওঔ"
+
+# Bengali danda variants used as section-terminating punctuation
+# U+0964 = ।  (devanagari danda, also used in Bengali)
+# U+0965 = ॥  (double danda — rare but present)
+# U+09F7 = ৷  (Bengali currency numerator four — BDLaw uses this as danda)
+_BN_DANDA = "৷।॥"
+
+# ---------------------------------------------------------------------------
 # Regex patterns compiled once at module level
+# ---------------------------------------------------------------------------
 RE_FOOTNOTE_INLINE = re.compile(r"\[\d+\]|\[\*+\s*\*+\]|\^\S+\^")
 RE_WHITESPACE_COLLAPSE = re.compile(r"[ \t]+")
 RE_MULTI_NEWLINE = re.compile(r"\n{3,}")
 
-# List-item patterns
-RE_ALPHA_ITEM = re.compile(r"^\(([a-zA-Z])\)\s+(.*)", re.DOTALL)
-RE_ROMAN_ITEM = re.compile(r"^\(([ivxlcdmIVXLCDM]+)\)\s+(.*)", re.DOTALL)
-RE_DECIMAL_ITEM = re.compile(r"^\((\d+)\)\s+(.*)", re.DOTALL)
+# Latin list-item patterns
+RE_ALPHA_ITEM    = re.compile(r"^\(([a-zA-Z])\)\s+(.*)",            re.DOTALL)
+RE_ROMAN_ITEM    = re.compile(r"^\(([ivxlcdmIVXLCDM]+)\)\s+(.*)",  re.DOTALL)
+RE_DECIMAL_ITEM  = re.compile(r"^\((\d+)\)\s+(.*)",                 re.DOTALL)
 
-# Section-number patterns (handles "54A.", "[54A.]", "4A.", "102." etc.)
+# Bengali list-item patterns
+# (ক) text   or   (কক) text  (compound label like "কক" for sub-sub items)
+RE_BN_ALPHA_ITEM   = re.compile(
+    r"^\(([" + _BN_CONS + r"]+)\)\s+(.*)", re.DOTALL
+)
+# (১) text   or   (১২) text
+RE_BN_DECIMAL_ITEM = re.compile(r"^\(([০-৯]+)\)\s+(.*)", re.DOTALL)
+
+# (অ) text  (আ) text  (ই) text … — Bengali vowel sub-list markers
+RE_BN_VOWEL_ITEM = re.compile(
+    r"^\(([" + _BN_VOWELS + r"])\)\s+(.*)", re.DOTALL
+)
+
+# Section-number patterns — Latin
+# Handles "54A.", "[54A.]", "4A.", "102." etc.
 RE_SECTION_NUM_BRACKET = re.compile(r"^\[([A-Za-z0-9]+(?:\.[A-Za-z0-9]+)?)\s*\.\s*\]?\s*")
 RE_SECTION_NUM_PLAIN   = re.compile(r"^([A-Za-z0-9]+(?:\.[A-Za-z0-9]+)?)\.\s+")
 # Handles '140.(1) text' — section number immediately followed by a clause marker
-# Handles "140.(1)", "4A.(a)", "3.(i)" — section number + any clause marker
 RE_SECTION_NUM_CLAUSE  = re.compile(r"^([A-Za-z0-9]+(?:\.[A-Za-z0-9]+)?)\.[\(\[]([A-Za-z0-9]+)[\)\]]")
+
+# Bengali section-number patterns
+# "১৷ "  "২।"  "৬ক।"  "১০৷(১)"  "৬ক।(১)"
+# The optional [_BN_CONS]? suffix handles sub-sections like ৬ক, ৬খ, ৬গ, ৬ঘ.
+RE_BN_SECTION_NUM_PLAIN  = re.compile(
+    r"^([০-৯]+[" + _BN_CONS + r"]?(?:\.[০-৯]+)?)[" + _BN_DANDA + r"]\s+"
+)
+RE_BN_SECTION_NUM_CLAUSE = re.compile(
+    r"^([০-৯]+[" + _BN_CONS + r"]?)[" + _BN_DANDA + r"][\(\[]([০-৯" + _BN_CONS + r"]+)[\)\]]"
+)
+# Bracketed Bengali: "[৬ক।]" / "[১৷]" style (amended/inserted provisions)
+RE_BN_SECTION_NUM_BRACKET = re.compile(
+    r"^\[([০-৯]+[" + _BN_CONS + r"]?(?:\.[০-৯]+)?)[" + _BN_DANDA + r"]\]?\s*"
+)
 
 # ---------------------------------------------------------------------------
 # Logging setup
@@ -236,33 +289,48 @@ def _get_text(tag: Tag) -> str:
     return _normalise(tag.get_text(separator="\n"))
 
 
+def _bn_digits_to_int(s: str) -> Optional[int]:
+    """Convert a string of Bengali digits (or mixed) to int, or None on failure."""
+    try:
+        return int(s.translate(BENGALI_DIGIT_MAP))
+    except (ValueError, AttributeError):
+        return None
+
+
 def extract_section_number(raw_text: str) -> Optional[str]:
     """
     Return the section number from raw section body text, or None.
     Handles:
-      "54A. text"       — plain number + space
-      "[54A.] text"     — bracketed (inserted provision)
-      "140.(1) text"    — number immediately followed by clause marker
-      "4A.(a) text"     — lettered section + alpha/decimal clause
-      "3\n[2A. text]"  — footnote digit on its own line before the number;
-                          the <sup> anchor in BDLaw HTML produces this pattern.
+      Latin:
+        "54A. text"       — plain number + space
+        "[54A.] text"     — bracketed (inserted provision)
+        "140.(1) text"    — number immediately followed by clause marker
+      Bengali:
+        "১৷ text"         — Bengali digit + danda + space
+        "২। text"         — danda variant
+        "[১৷] text"       — bracketed Bengali
+        "৪৷(ক) text"      — Bengali digit + danda + clause marker
     """
-    # 1. Drop lines that are only a bare digit (stray footnote references).
-    #    Must happen before bracket/pattern detection or "3\n[2A. text]"
-    #    is never seen as starting with "[".
+    # 1. Drop lines that are only a bare digit / Bengali digit (stray footnote refs).
     cleaned = "\n".join(
         line for line in raw_text.splitlines()
-        if not re.fullmatch(r"\s*\d+\s*", line)
+        if not re.fullmatch(r"\s*[\d০-৯]+\s*", line)
     )
     stripped = cleaned.lstrip()
 
-    # 2. Unwrap outer [ ] — entire section body wrapped in brackets indicates
-    #    an inserted/amended provision, e.g. "[2A. The state religion...]".
+    # 2. Unwrap outer [ ] for inserted/amended provisions.
     if stripped.startswith("[") and stripped.endswith("]"):
         stripped = stripped[1:-1].lstrip()
 
-    # 3. Match against all known section-number patterns.
-    for pat in (RE_SECTION_NUM_BRACKET, RE_SECTION_NUM_PLAIN, RE_SECTION_NUM_CLAUSE):
+    # 3. Bengali patterns first (more specific), then Latin.
+    for pat in (
+        RE_BN_SECTION_NUM_BRACKET,
+        RE_BN_SECTION_NUM_PLAIN,
+        RE_BN_SECTION_NUM_CLAUSE,
+        RE_SECTION_NUM_BRACKET,
+        RE_SECTION_NUM_PLAIN,
+        RE_SECTION_NUM_CLAUSE,
+    ):
         m = pat.match(stripped)
         if m:
             return m.group(1)
@@ -287,7 +355,6 @@ def parse_footnotes(soup: BeautifulSoup) -> Optional["FootnotesItem"]:
             num = int(sup.get_text(strip=True))
         except ValueError:
             continue
-        # Collect text nodes that are NOT inside the h6 number heading
         h6 = li.find("h6")
         parts: list[str] = []
         for node in li.children:
@@ -339,23 +406,9 @@ _RE_ANNOTATION_BRACKETS = re.compile(r"\[(?!\*\s*\*)(.*?)\]", re.DOTALL)
 def parse_preamble(soup: BeautifulSoup) -> str:
     """
     Extract and clean the act preamble from div.preamble-content.
-
-    Cleaning pipeline:
-      1. Drop bare-digit lines (stray <sup> footnote numbers).
-      2. Collapse horizontal whitespace.
-      3. Truncate at the first CONTENTS/SECTIONS heading — everything after
-         is a ToC that we don't want in the preamble.
-      4. Strip annotation brackets [inserted text] → text; preserve [* * *].
-      5. Rejoin lines split mid-sentence by a <sup> element.
-      6. Collapse excess blank lines.
-
-    Returns '' when no preamble div is found.
     """
-    # Primary: specific class used on both print and normal BDLaw pages
     preamble_div = soup.find("div", class_="preamble-content")
 
-    # Fallback: find <section class="padding-bottom-20"> that has no bg-striped
-    # and no bg-act-section (title) — the middle section is always the preamble
     if not preamble_div:
         for sec in soup.find_all("section", class_="padding-bottom-20"):
             classes = sec.get("class", [])
@@ -368,36 +421,21 @@ def parse_preamble(soup: BeautifulSoup) -> str:
 
     raw = preamble_div.get_text(separator="\n")
 
-    # 1. Remove inline [N] footnote markers
     raw = RE_FOOTNOTE_INLINE.sub("", raw)
-
-    # 2. Normalize ALL horizontal whitespace including \xa0 (from &nbsp; in
-    #    BDLaw <div class="clbr">&nbsp;</div> spacers).  The original pipeline
-    #    used [ \t]+ which left \xa0 intact, producing lines that appear blank
-    #    but are not, causing blank-line collapse and content detection to fail.
     raw = re.sub(r"[^\S\n]+", " ", raw)
-
-    # 3. Strip each line so that " " (single space) from step 2 becomes ""
     raw = "\n".join(l.strip() for l in raw.splitlines())
-
-    # 4. Drop blank lines AND bare-digit-only lines (footnote numbers from <sup>)
     raw = "\n".join(
         l for l in raw.splitlines()
-        if l and not re.fullmatch(r"\d+", l)
+        if l and not re.fullmatch(r"[\d০-৯]+", l)
     )
 
-    # 5. Truncate at CONTENTS/SECTIONS — the ToC follows immediately after
     for marker in ("\nCONTENTS", "\nSECTIONS"):
         idx = raw.find(marker)
         if idx != -1:
             raw = raw[:idx]
 
-    # 6. Strip annotation brackets [inserted text] → text; keep [* * *]
     raw = _RE_ANNOTATION_BRACKETS.sub(r"\1", raw)
 
-    # 7. Rejoin lines split mid-sentence by a <sup> insertion.
-    #    Heuristic: line without terminal punctuation whose next non-blank
-    #    continuation starts with a lowercase letter.
     lines = raw.splitlines()
     joined: list[str] = []
     i = 0
@@ -407,7 +445,6 @@ def parse_preamble(soup: BeautifulSoup) -> str:
         while j < len(lines) and not lines[j]:
             j += 1
         next_line = lines[j] if j < len(lines) else ""
-        # NEW
         is_continuation = bool(next_line) and (
             next_line[0] in ";,)"
             or (not re.search(r"[.;:!?]$", line) and next_line[0].islower())
@@ -420,11 +457,8 @@ def parse_preamble(soup: BeautifulSoup) -> str:
             joined.append(line)
             i += 1
 
-    # 8. Collapse 3+ blank lines → 2
     raw = re.sub(r"\n{3,}", "\n\n", "\n".join(joined)).strip()
 
-    # 9. Strip a lone opening '[' that was never closed (BDLaw sometimes omits
-    #    the closing ']' for a preamble provision spanning the whole block).
     if raw.startswith("[") and "]" not in raw.split("\n")[0]:
         raw = raw[1:].lstrip()
 
@@ -442,29 +476,18 @@ def parse_detail(soup: BeautifulSoup, base: str) -> Generator[DocNode, None, Non
     last_section_num: str = ""
 
     for row in container.find_all("div", class_="row", recursive=False):
-        # ── PART ──────────────────────────────────────────────────────────────
-        # IMPORTANT: BDLaw places the part heading and the first section of that
-        # part inside the SAME .row div.  We must NOT `continue` after yielding
-        # the PartItem — we fall through so the section block below also runs.
         part_group = row.find("div", class_="act-part-group")
         if part_group:
-            # Part number: <p class="act-part-no"><a>Part I</a></p>
             no_p   = part_group.find("p", class_="act-part-no")
             link   = no_p.find("a") if no_p else part_group.find("a")
             if link and link.get("href"):
                 part_num = _normalise(link.get_text(strip=True))
                 part_url = urljoin(base, link["href"])
-                # Subtitle: <p class="act-part-name"><a>PRELIMINARY</a></p>
-                # The subtitle IS inside an <a> — use the specific class, not a
-                # "has no link" heuristic which would wrongly reject it.
                 name_p   = part_group.find("p", class_="act-part-name")
                 subtitle = _normalise(name_p.get_text(strip=True)) if name_p else ""
                 full_name = f"{part_num}: {subtitle}" if subtitle else part_num
                 yield PartItem(name=full_name, url=part_url)
-            # NO continue — fall through to the section block below.
 
-        # ── CHAPTER ───────────────────────────────────────────────────────────
-        # Same reasoning: a chapter row may contain the chapter's first section.
         chapter_group = row.find("div", class_="act-chapter-group")
         if chapter_group:
             chap_no_p   = row.find("p", class_="act-chapter-no")
@@ -474,13 +497,7 @@ def parse_detail(soup: BeautifulSoup, base: str) -> Generator[DocNode, None, Non
                 chap_name = _normalise(chap_name_p.get_text(strip=True)) if chap_name_p else ""
                 full_chap = f"{chap_no}: {chap_name}" if chap_name else chap_no
                 yield ChapterItem(name=full_chap)
-            # NO continue.
 
-        # ── SUB-CHAPTER HEAD  (A.-Classes of Criminal Courts, etc.) ──────────
-        # BDLaw uses <p class="act-section-head"> for lettered sub-headings
-        # within a chapter.  They may share the row with the first section
-        # they introduce, so we scan rather than using find_all with recursive=False.
-        # ── SUB-CHAPTER HEAD ─────────────────────────────────────────────────
         for sec_head in row.find_all("p", class_="act-section-head"):
             raw = _normalise(
                 " ".join(sec_head.get_text(separator=" ", strip=True).split())
@@ -493,10 +510,8 @@ def parse_detail(soup: BeautifulSoup, base: str) -> Generator[DocNode, None, Non
                     parent_number=last_section_num,
                 )
             elif raw:
-                # Fallback for unexpected formats: emit as-is with no letter
                 yield SubChapterItem(letter="", subtitle=raw, parent_number=last_section_num)
 
-        # ── SECTION ──────────────────────────────────────────────────────────
         head_div    = row.find("div", class_="txt-head")
         details_div = row.find("div", class_="txt-details")
 
@@ -510,7 +525,7 @@ def parse_detail(soup: BeautifulSoup, base: str) -> Generator[DocNode, None, Non
             raw_text = _get_text(details_div)
             number   = extract_section_number(raw_text)
             if number:
-                last_section_num = number   # ← UPDATE TRACKER
+                last_section_num = number
             if not _is_boilerplate(raw_text):
                 yield SectionItem(heading=heading, url="#", html=details_div, number=number)
 
@@ -522,9 +537,7 @@ def resolve_urls(
 ) -> list[DocNode]:
     """
     Fill in real URLs for SectionItems and ChapterItems using the ToC map.
-    Mutates nodes in-place for efficiency; also returns the list.
     """
-    # Build a fast lookup: lowercased → url
     lower_map = {k.lower(): v for k, v in toc_map.items()}
 
     for node in nodes:
@@ -533,7 +546,6 @@ def resolve_urls(
             if key in lower_map:
                 node.url = lower_map[key]
             else:
-                # Fuzzy: check if heading is a suffix match
                 for k, u in lower_map.items():
                     if k.endswith(key) or key in k:
                         node.url = u
@@ -553,22 +565,40 @@ def _strip_footnotes(text: str) -> str:
 def _strip_leading_section_num(text: str) -> str:
     """
     Remove leading section number from body text. Handles:
-      "54A. rest"    → "rest"
-      "[54A.] rest"  → "rest"
-      "140.(1) rest" → "(1) rest"   ← clause marker stays so list conversion works
+      Latin:
+        "54A. rest"    → "rest"
+        "[54A.] rest"  → "rest"
+        "140.(1) rest" → "(1) rest"
+      Bengali:
+        "১৷ rest"      → "rest"
+        "৪৷(ক) rest"   → "(ক) rest"
+        "[১৷] rest"    → "rest"
     """
     stripped = text.lstrip()
-    # Try plain and bracketed first (consume trailing whitespace too)
+
+    # Bengali: bracketed, plain, then clause-style
+    for pat in (RE_BN_SECTION_NUM_BRACKET, RE_BN_SECTION_NUM_PLAIN):
+        m = pat.match(stripped)
+        if m:
+            return text[text.index(stripped) + m.end():]
+    m = RE_BN_SECTION_NUM_CLAUSE.match(stripped)
+    if m:
+        # Strip "১৷", leave "(ক)" for list converter
+        dot_pos = next(
+            i for i, c in enumerate(stripped) if c in _BN_DANDA
+        )
+        return text[text.index(stripped) + dot_pos + 1:]
+
+    # Latin: plain, bracketed, clause-style
     for pat in (RE_SECTION_NUM_BRACKET, RE_SECTION_NUM_PLAIN):
         m = pat.match(stripped)
         if m:
             return text[text.index(stripped) + m.end():]
-    # Clause-style: "140.(1)" — strip only "140.", leave "(1)" for list converter
     m = RE_SECTION_NUM_CLAUSE.match(stripped)
     if m:
-        # m.end() lands after "(1)" — we want to keep "(1)", so go back to the dot
         dot_pos = stripped.index(".")
         return text[text.index(stripped) + dot_pos + 1:]
+
     return text
 
 
@@ -579,17 +609,17 @@ def _strip_outer_brackets(text: str) -> str:
         text = text[1:-1].strip()
     return text
 
-_RE_ISOLATED_LABEL = re.compile(r"^\(([a-zA-Z0-9]+)\)\s*$")
+
+# Isolated label regex — includes Bengali consonant markers and Bengali digits
+_RE_ISOLATED_LABEL = re.compile(
+    r"^\(([a-zA-Z0-9" + _BN_CONS + _BN_VOWELS + r"০-৯]+)\)\s*$"
+)
+
 
 def _join_isolated_labels(text: str) -> str:
     """
-    Join an isolated list label "(N)" / "(a)" / "(i)" that sits on its own
-    line with the next non-blank line.  BDLaw sometimes emits:
-        (4)
-        A Metropolitan Area shall …
-    which must become:
-        (4) A Metropolitan Area shall …
-    so that convert_lists can recognise it as a list item.
+    Join an isolated list label "(N)" / "(a)" / "(ক)" that sits on its own
+    line with the next non-blank line.
     """
     lines = text.splitlines()
     out: list[str] = []
@@ -607,13 +637,11 @@ def _join_isolated_labels(text: str) -> str:
         i += 1
     return "\n".join(out)
 
+
 def _join_continuation_lines(text: str) -> str:
     """
     Join a line with the next when the next starts with continuation
-    punctuation (; , )) — produced when an inline footnote number is
-    stripped from mid-sentence HTML, leaving the punctuation stranded on
-    a new line.  Also re-applies the lowercase-start heuristic so both
-    preamble and section-body text go through the same code path.
+    punctuation (; , )) or a lowercase letter mid-sentence.
     """
     lines = text.splitlines()
     out: list[str] = []
@@ -626,7 +654,6 @@ def _join_continuation_lines(text: str) -> str:
         next_line = lines[j].strip() if j < len(lines) else ""
         if line.strip() and next_line:
             if next_line[0] in ";,)":
-                # No space — punctuation glues directly onto the previous token
                 out.append(line.rstrip() + next_line)
                 i = j + 1
                 continue
@@ -639,6 +666,7 @@ def _join_continuation_lines(text: str) -> str:
         i += 1
     return "\n".join(out)
 
+
 # Patterns for boilerplate content that should be dropped entirely
 _RE_BOILERPLATE_LINE = re.compile(
     r"^\s*"
@@ -649,11 +677,8 @@ _RE_BOILERPLATE_LINE = re.compile(
 _RE_URL_ONLY   = re.compile(r"^\s*https?://\S+\s*$")
 _RE_TOC_LINK   = re.compile(r"^\s*\[.+?\]\(https?://")
 RE_SUBCHAPTER_HEAD = re.compile(r"^([A-Z])\.\s*-\s*(.+)$")
-# BDLaw wraps substituted single letters in [X] — e.g. [A] where 'A' replaced
-# 'the Dacca'.  Must be stripped BEFORE _RE_ANNOTATION_BRACKETS, otherwise
-# the non-greedy outer match consumes [X]'s closing ']' and leaves a dangling
-# '[X' in the group-1 replacement, orphaning the outer closing ']'.
 _RE_SUBST_LETTER = re.compile(r"\[([A-Z])\]")
+
 
 def _table_to_markdown(table: Tag) -> str:
     """Convert HTML <table> → GFM Markdown table string."""
@@ -676,11 +701,12 @@ def _table_to_markdown(table: Tag) -> str:
     ] + ["| " + " | ".join(r) + " |" for r in rows[1:]]
     return "\n".join(lines)
 
+
 def _is_boilerplate(raw: str) -> bool:
     """
     Return True if the text consists entirely (or almost entirely) of
     boilerplate: act preamble, WHEREAS clauses, CONTENTS headers,
-    or bare ToC links.  Used to skip spurious txt-details-only rows.
+    or bare ToC links.
     """
     lines = [l for l in raw.splitlines() if l.strip()]
     if not lines:
@@ -689,7 +715,6 @@ def _is_boilerplate(raw: str) -> bool:
         1 for l in lines
         if _RE_BOILERPLATE_LINE.search(l) or _RE_URL_ONLY.match(l) or _RE_TOC_LINK.match(l)
     )
-    # Consider it boilerplate if >60 % of non-empty lines match
     return boilerplate_count / len(lines) > 0.6
 
 
@@ -710,43 +735,85 @@ def _filter_stray_lines(text: str) -> str:
     return "\n".join(kept)
 
 
-# Single-letter roman numerals that are ambiguous with alpha list labels.
-# We treat all of these as roman when they appear in a list context.
 def _classify_item(line: str) -> Optional[str]:
     """
-    Return 'alpha', 'roman', 'decimal', or None for a list-item line.
+    Return 'alpha', 'roman', 'decimal', 'bn_alpha', 'bn_decimal', or None.
 
-    Disambiguation rules for legal documents:
-      • Decimal  (1)(2)(3) → 'decimal'  (unambiguous)
-      • Multi-char pure-roman label (ii)(iii)(iv) → 'roman'  (unambiguous)
-      • Single char 'i' → 'roman'  (legal lists always start at (i), never (i)(j)(k))
-      • Any other single letter → 'alpha'
-        Note: (c)(d)(l)(m)(v)(x) look like roman chars but are never used as
-        roman-list starters in Bangladesh legal drafting; they are alpha.
+    Bengali:
+      (ক)(খ)(গ) … → 'bn_alpha'   (rendered as lower-alpha <ol>)
+      (১)(২)(৩) … → 'bn_decimal' (rendered as 1. 2. 3.)
+
+    Latin (unchanged):
+      Decimal  (1)(2)(3) → 'decimal'
+      Multi-char roman (ii)(iii) → 'roman'
+      Single 'i' → 'roman'
+      Any other single letter → 'alpha'
     """
     s = line.strip()
+
+    # Bengali decimal: (১), (২), (৩) …
+    if RE_BN_DECIMAL_ITEM.match(s):
+        return "bn_decimal"
+
+    # Bengali alpha: (ক), (খ), (গ), (কক) …
+    if RE_BN_ALPHA_ITEM.match(s):
+        return "bn_alpha"
+
+    # Bengali vowel sub-list: (অ), (আ), (ই), (ঈ), (উ), (ঊ) …
+    # Always nested inside a parent (ক)(খ) item — treated as continuation
+    # during parent collection, then resolved by recursive convert_lists.
+    if RE_BN_VOWEL_ITEM.match(s):
+        return "bn_vowel"
+
+    # Latin decimal
     if RE_DECIMAL_ITEM.match(s):
         return "decimal"
+
     # Multi-char roman: ii, iii, iv, vi …
     m_roman = RE_ROMAN_ITEM.match(s)
     if m_roman and len(m_roman.group(1)) > 1:
         return "roman"
-    # Single-character label
+
+    # Single-character Latin label
     m_alpha = RE_ALPHA_ITEM.match(s)
     if m_alpha:
         label = m_alpha.group(1).lower()
         return "roman" if label == "i" else "alpha"
+
     return None
 
 
 def _extract_item_content(line: str) -> str:
-    """Strip the leading (x) label from a list-item line."""
+    """Strip the leading (x) label from a list-item line (Latin or Bengali)."""
     s = line.strip()
-    for pat in (RE_ALPHA_ITEM, RE_ROMAN_ITEM, RE_DECIMAL_ITEM):
+    for pat in (
+        RE_ALPHA_ITEM,
+        RE_ROMAN_ITEM,
+        RE_DECIMAL_ITEM,
+        RE_BN_ALPHA_ITEM,
+        RE_BN_DECIMAL_ITEM,
+        RE_BN_VOWEL_ITEM,
+    ):
         m = pat.match(s)
         if m:
             return m.group(2).strip()
     return s
+
+
+def _get_decimal_num(line: str) -> Optional[int]:
+    """
+    Extract the integer value from a decimal list-item line.
+    Handles both Latin (1)(2) and Bengali (১)(২).
+    Returns None if not a decimal item.
+    """
+    s = line.strip()
+    m = RE_DECIMAL_ITEM.match(s)
+    if m:
+        return int(m.group(1))
+    m = RE_BN_DECIMAL_ITEM.match(s)
+    if m:
+        return _bn_digits_to_int(m.group(1))
+    return None
 
 
 def convert_lists(text: str) -> str:
@@ -754,11 +821,13 @@ def convert_lists(text: str) -> str:
     Group consecutive list items of the same type into proper Markdown/HTML.
 
     Rules:
-      - (a)(b)…  → <ol style="list-style-type: lower-alpha;">
-      - (i)(ii)… → <ol style="list-style-type: lower-roman;">
-      - (1)(2)…  → Markdown  1. 2. …
-      - Single isolated items → plain text (no wrapping)
-    Blank lines between items of the same type are absorbed into the group.
+      - (a)(b)…      → <ol style="list-style-type: lower-alpha;">
+      - (i)(ii)…     → <ol style="list-style-type: lower-roman;">
+      - (1)(2)…      → Markdown  1. 2. …
+      - (ক)(খ)(গ)…   → <ol style="list-style-type: lower-alpha;">
+      - (১)(২)(৩)…   → Markdown  1. 2. … (Bengali digits converted to Arabic)
+      - Single isolated alpha/roman/bn_alpha items → plain text (no wrapper)
+      - Single decimal / bn_decimal items → always rendered as N. (clause ref)
     """
     lines = text.splitlines()
     out: list[str] = []
@@ -773,36 +842,33 @@ def convert_lists(text: str) -> str:
             continue
 
         # Collect all items of *this* list type, tolerating blank lines
-        items: list[list[str]] = []  # each entry = list of raw lines for one item
+        items: list[list[str]] = []
         while i < n:
             if _classify_item(lines[i]) != lt and lines[i].strip():
-                break  # non-matching non-empty line → end of list
+                break
             if not lines[i].strip():
-                i += 1  # skip blank lines between items
+                i += 1
                 continue
 
-            # Start new list item
             item_lines = [lines[i]]
             i += 1
-            # Absorb continuation lines (non-label, non-blank runs)
             while i < n:
                 next_lt = _classify_item(lines[i])
                 if next_lt == lt:
-                    break  # next sibling item
-                if next_lt is not None:
-                    break  # different list type starts
+                    break
+                if next_lt is not None and next_lt != "bn_vowel":
+                    break  # bn_vowel items are sub-items; absorb as continuation
                 if lines[i].strip():
                     item_lines.append(lines[i])
                     i += 1
                 else:
-                    # blank line — look ahead; if next non-blank is same type, stay in item
                     j = i + 1
                     while j < n and not lines[j].strip():
                         j += 1
                     if j < n and _classify_item(lines[j]) == lt:
-                        break  # blank separates items, not continuation
+                        break
                     elif j < n and not _classify_item(lines[j]):
-                        item_lines.append("")  # blank inside item content
+                        item_lines.append("")
                         i += 1
                     else:
                         break
@@ -811,34 +877,37 @@ def convert_lists(text: str) -> str:
         if not items:
             continue
 
-        if lt == "decimal":
-            # Always render with actual label numbers, even for a single clause.
-            # A lone "(3) text" must become "3. text", not plain prose — the number
-            # is substantive (it's the clause reference in the parent section).
+        if lt in ("decimal", "bn_decimal"):
+            # Always render with actual label numbers; Bengali digits → Arabic.
             for item_lines in items:
-                m = RE_DECIMAL_ITEM.match(item_lines[0].strip())
-                num = int(m.group(1)) if m else None
+                num = _get_decimal_num(item_lines[0])
                 content = " ".join(
                     [_extract_item_content(item_lines[0])]
                     + [l.strip() for l in item_lines[1:] if l.strip()]
                 )
                 out.append(f"{num}. {content}" if num is not None else content)
-        elif len(items) == 1:
-            # Single alpha/roman item — no list wrapper needed, emit as plain prose.
-            first = _extract_item_content(items[0][0])
-            rest = items[0][1:]
-            out.append("\n".join([first] + rest).strip())
-        else:
-            style = "lower-alpha" if lt == "alpha" else "lower-roman"
-            html_parts = [f'<ol style="list-style-type: {style};">']
-            for item_lines in items:
-                content_lines = [_extract_item_content(item_lines[0])] + [
-                    l for l in item_lines[1:]
-                ]
-                content = "\n".join(content_lines).strip()
-                html_parts.append(f"<li>{content}</li>")
-            html_parts.append("</ol>")
-            out.append("".join(html_parts))
+
+        elif lt in ("alpha", "roman", "bn_alpha", "bn_vowel"):
+            if len(items) == 1:
+                # Single item — emit as plain prose, no list wrapper.
+                first = _extract_item_content(items[0][0])
+                rest = items[0][1:]
+                out.append("\n".join([first] + rest).strip())
+            else:
+                style = (
+                    "lower-roman" if lt == "roman" else "lower-alpha"
+                )
+                html_parts = [f'<ol style="list-style-type: {style};">']
+                for item_lines in items:
+                    content_lines = [_extract_item_content(item_lines[0])] + [
+                        l for l in item_lines[1:]
+                    ]
+                    # Recursively convert any bn_vowel sub-lists absorbed
+                    # as continuation into proper nested <ol> elements.
+                    content = convert_lists("\n".join(content_lines).strip())
+                    html_parts.append(f"<li>{content}</li>")
+                html_parts.append("</ol>")
+                out.append("".join(html_parts))
 
     return "\n".join(out)
 
@@ -857,36 +926,30 @@ def html_to_markdown(details_div: Tag) -> str:
     # 2. Collapse horizontal whitespace (preserve newlines)
     raw = re.sub(r"[^\S\n]+", " ", raw)
 
-    # 3. Remove lines that are *only* a bare integer (stray footnote number
-    #    left by the <sup> element after its [N] sibling was stripped).
-    #    MUST happen before _strip_outer_brackets: a bare "3\n" before
-    #    "[2A. text]" would otherwise prevent the bracket detection.
+    # 3. Remove lines that are *only* bare integers / Bengali digits
     raw = "\n".join(
-        line for line in raw.splitlines() if not re.fullmatch(r"\s*\d+\s*", line)
+        line for line in raw.splitlines()
+        if not re.fullmatch(r"\s*[\d০-৯]+\s*", line)
     )
 
     # 4. Remove surrounding [ ] brackets BDLaw adds to inserted provisions
     raw = _strip_outer_brackets(raw)
 
-    # 5. Strip leading section number from body (e.g. "2A. " or "54A. ")
+    # 5. Strip leading section number from body
     raw = _strip_leading_section_num(raw)
 
     # 5b. Remove stray URL-only lines and ToC link lines
     raw = _filter_stray_lines(raw)
 
-    # 5c. Strip single-letter substitution markers [A], [B] … first, then
-    #     general annotation brackets.  Order matters: the letter markers
-    #     must go first or they poison the outer bracket match (see above).
+    # 5c. Strip single-letter substitution markers [A], [B] … then general
+    #     annotation brackets.
     raw = _RE_SUBST_LETTER.sub(r"\1", raw)
     raw = _RE_ANNOTATION_BRACKETS.sub(r"\1", raw)
 
     # 5d. Strip orphan leading ". " before a clause marker.
-    #     BDLaw emits sub-clauses as ". (3) text" with no section-number
-    #     prefix when the heading and body are in separate HTML elements.
     raw = re.sub(r"^\.\s+(?=\()", "", raw.lstrip())
 
     # 5e. Join isolated clause labels with their following content line.
-    #     "(4)\nA Metropolitan Area …" → "(4) A Metropolitan Area …"
     raw = _join_isolated_labels(raw)
 
     # 6. Convert list items to proper Markdown / HTML
@@ -939,10 +1002,10 @@ def build_markdown(
                 term = "Article" if "/Article-" in node.url else "Section"
                 heading_text = f"{term} {node.number}: {node.heading}"
                 is_inserted = any(c.isalpha() for c in node.number)
-                level = "######" if is_inserted else "#####"  # was ##### / ####
+                level = "######" if is_inserted else "#####"
             else:
                 heading_text = node.heading
-                level = "#####"  # was ####
+                level = "#####"
             lines.append(f"\n{level} [{heading_text}]({node.url})\n")
             lines.append(html_to_markdown(node.html))
             lines.append("")
