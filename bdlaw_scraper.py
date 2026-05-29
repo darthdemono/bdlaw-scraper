@@ -1784,7 +1784,7 @@ def _scrape_all_acts(
               help="Scrape all acts (1–1719) in parallel.")
 @click.option("--output", "-o", default=None,
               help="Output Markdown file (single-act mode). Defaults to act-<number>.md.")
-@click.option("--output-dir", default="act", show_default=True,
+@click.option("--output-dir", default="acts", show_default=True,
               help="Output directory for --all mode.")
 @click.option("--delay", "-d", default=0.3, show_default=True, type=float,
               help="Min seconds between HTTP requests per worker.")
