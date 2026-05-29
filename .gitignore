@@ -1,3 +1,8 @@
 old/
 *.md
 *.pdf
+cache/
+repo/
+.claude/
+__pycache__/
+*.pyc
