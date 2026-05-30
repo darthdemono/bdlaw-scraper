@@ -1,9 +1,12 @@
 old/
 *.pdf
 cache/
-acts/
 pdf/
 test/
 .claude/
 __pycache__/
 *.pyc
+act-*.md
+.env
+venv/
+acts/

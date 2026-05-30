@@ -1,20 +1,54 @@
 #!/usr/bin/env python3
 """
-Bangladesh Law Scraper v3.6
-============================
-Changes vs v3.5:
-  - convert_lists: proper depth-based nesting (decimal->alpha->roman = 1->2->3)
-  - _classify_item / _extract_item_content: strip leading [^N] before matching
-    so "[^7](a) text" is correctly classified as alpha depth-2
-  - Trailing stray ] cleanup at end of section bodies
-  - _convert_numbered_callout runs convert_lists on item content (handles sub-lists)
+Bangladesh Law Scraper
+======================
+Scrapes acts from bdlaws.minlaw.gov.bd and converts them to Obsidian-compatible
+Markdown files with YAML frontmatter, structured headings, callouts, wikilinks,
+footnote anchors, and a searchable act-index.md.
+
+Architecture
+------------
+Fetching
+    Scraper — rate-limited, retry-backed HTTP session with optional disk cache.
+    Each act needs two pages: act-N.html (ToC) and act-print-N.html (full text).
+
+Parsing
+    parse_* functions use BeautifulSoup to extract structured data from the
+    site's fixed HTML layout: title, preamble, sections, footnotes, metadata.
+
+Conversion  (html_to_markdown pipeline)
+    The raw HTML of each section passes through ~20 sequential transforms:
+    table expansion, footnote conversion, annotation bracket stripping,
+    list nesting, callout generation (Explanation/Exception/Definition/etc.),
+    section cross-linking, and OCR-error correction for Bengali text.
+
+Output  (build_markdown)
+    Assembles a YAML frontmatter block (title, description, tags, dates,
+    section index) followed by the rendered DocNode tree. DocNode is a
+    union of PartItem | ChapterItem | SubChapterItem | SectionItem |
+    PreambleItem | FootnotesItem, each rendered at the appropriate heading level.
+
+Batch
+    _scrape_all_acts() runs scrape_act() in a ThreadPoolExecutor across acts
+    1–1719, then calls generate_index() to write act-index.md.
+
+Wikilink format
+    All cross-act links use [[act-N\\|Display Text]] (escaped pipe) for
+    compatibility with Obsidian tables and Quartz static site generation.
+
+Usage
+-----
+    Single act : python bdlaw_scraper.py --act 1710
+    All acts   : python bdlaw_scraper.py --all --output-dir acts --workers 8
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import sys
+import threading
 import time
 import unicodedata
 from dataclasses import dataclass
@@ -59,6 +93,28 @@ HEADERS = {
 }
 
 BENGALI_DIGIT_MAP = str.maketrans("০১২৩৪৫৬৭৮৯", "0123456789")
+
+_BN_MONTH_MAP: dict[str, int] = {
+    'জানুয়ারি': 1, 'জানুয়ারী': 1, 'ফেব্রুয়ারি': 2, 'ফেব্রুয়ারী': 2,
+    'মার্চ': 3, 'এপ্রিল': 4, 'মে': 5, 'জুন': 6, 'জুলাই': 7,
+    'আগস্ট': 8, 'আগষ্ট': 8, 'সেপ্টেম্বর': 9, 'অক্টোবর': 10,
+    'নভেম্বর': 11, 'ডিসেম্বর': 12,
+}
+_EN_MONTH_MAP: dict[str, int] = {
+    'january': 1, 'february': 2, 'march': 3, 'april': 4, 'may': 5,
+    'june': 6, 'july': 7, 'august': 8, 'september': 9, 'october': 10,
+    'november': 11, 'december': 12,
+}
+_ORDINAL_WORDS: dict[str, int] = {
+    'first': 1, 'second': 2, 'third': 3, 'fourth': 4, 'fifth': 5,
+    'sixth': 6, 'seventh': 7, 'eighth': 8, 'ninth': 9, 'tenth': 10,
+    'eleventh': 11, 'twelfth': 12, 'thirteenth': 13, 'fourteenth': 14,
+    'fifteenth': 15, 'sixteenth': 16, 'seventeenth': 17, 'eighteenth': 18,
+    'nineteenth': 19, 'twentieth': 20, 'twenty-first': 21, 'twenty-second': 22,
+    'twenty-third': 23, 'twenty-fourth': 24, 'twenty-fifth': 25,
+    'twenty-sixth': 26, 'twenty-seventh': 27, 'twenty-eighth': 28,
+    'twenty-ninth': 29, 'thirtieth': 30, 'thirty-first': 31,
+}
 _BN_LETTER_TO_LATIN: dict[str, str] = {
     'ক': 'a', 'খ': 'b', 'গ': 'c', 'ঘ': 'd', 'ঙ': 'e',
     'চ': 'f', 'ছ': 'g', 'জ': 'h', 'ঝ': 'i', 'ঞ': 'j',
@@ -139,6 +195,9 @@ _RE_CONNECTOR = re.compile(
     re.IGNORECASE,
 )
 
+_RE_NEST_EXPL_START    = re.compile(r"^> \[!Explanation\]$")
+_RE_NEST_SECONDARY_HDR = re.compile(r"^> \[!(Illustrations?|Exception[s]?)\]$")
+
 _RE_HEADING_FOOTNOTE    = re.compile(r"\[(\d{1,4})([^\d\]][^\]]*)\]")
 _RE_ANNOTATION_BRACKETS = re.compile(r"(?<!\[)\[(?!\s*\*)(?!\^)(?!\[)([^\[\]]*)\](?!\])", re.DOTALL)
 _RE_SUBST_LETTER        = re.compile(r"\[([A-Z])\]")
@@ -154,7 +213,6 @@ _RE_ISOLATED_LABEL = re.compile(
 _RE_ANNOTATION_BRACKETS_PREAMBLE = re.compile(r"\[(?!\*\s*\*)(.*?)\]", re.DOTALL)
 _RE_BDLAWS_ACT   = re.compile(r"https?://bdlaws\.minlaw\.gov\.bd/act-(\d+)\.html")
 _RE_FN_PREFIX    = re.compile(r"^(\[\^\d+\])")
-_RE_FN_INLINE    = re.compile(r"^\[\^\d+\]\s*")   # for stripping before list-marker check
 _RE_RESIDUAL_HTML = re.compile(r"</?(li|ol|ul|p|div|span|br)[^>]*>", re.IGNORECASE)
 
 _MARGIN_CALLOUTS = [
@@ -185,44 +243,26 @@ _RE_DEFINITION      = re.compile(
 # ---------------------------------------------------------------------------
 
 _TAG_KEYWORDS: dict[str, list[str]] = {
-    "Criminal Law":       ["criminal", "penal code", "crime", "offence", "punishment",
-                           "magistrate", "prosecution", "accusation", "culpable"],
-    "Civil Law":          ["civil procedure", "civil court", "plaintiff", "defendant",
-                           "decree", "execution of decree", "suit"],
-    "Constitutional Law": ["constitution", "fundamental right", "parliament",
-                           "republic", "citizenship", "sovereignty"],
-    "Commercial Law":     ["commerce", "contract", "sale of goods", "company",
-                           "partnership", "arbitration", "mercantile"],
-    "Banking & Finance":  ["bank", "banking", "financial institution", "loan",
-                           "credit", "monetary", "interest"],
-    "Tax Law":            ["tax", "revenue", "customs", "excise", "vat",
-                           "income tax", "duty", "tariff"],
-    "Labour Law":         ["labour", "labor", "employment", "worker",
-                           "factory", "wages", "trade union"],
-    "Family Law":         ["marriage", "divorce", "matrimonial",
-                           "guardian", "inheritance", "succession", "dower"],
-    "Property Law":       ["property", "land", "tenancy", "mortgage",
-                           "transfer of property", "registration"],
-    "Evidence Law":       ["evidence", "witness", "proof", "admissibility"],
-    "Procedural Law":     ["procedure code", "jurisdiction", "appeal",
-                           "tribunal", "high court", "supreme court"],
-    "Environmental Law":  ["environment", "pollution", "forest",
-                           "wildlife", "biodiversity", "conservation"],
-    "Education Law":      ["education", "university", "school",
-                           "examination", "academic", "degree"],
-    "Health Law":         ["health", "medical", "hospital", "drug",
-                           "medicine", "pharmacy", "epidemic"],
-    "Administrative Law": ["government", "administration", "ministry",
-                           "officer", "public servant", "gazette"],
-    "Military Law":       ["army", "navy", "air force", "military",
-                           "armed forces", "defence"],
-    "Security Law":       ["security", "national security", "intelligence",
-                           "police", "special branch"],
-    "Immigration Law":    ["passport", "visa", "immigration",
-                           "citizenship", "nationality", "refugee"],
-    "Insurance Law":      ["insurance", "insurer", "policy", "indemnity", "premium"],
-    "Intellectual Property": ["copyright", "patent", "trademark",
-                              "intellectual property", "design"],
+    "CriminalLaw":          ["criminal", "penal code", "crime", "offence", "punishment", "magistrate", "prosecution", "accusation", "culpable"],
+    "CivilLaw":             ["civil procedure", "civil court", "plaintiff", "defendant", "decree", "execution of decree", "suit"],
+    "ConstitutionalLaw":    ["constitution", "fundamental right", "parliament", "republic", "citizenship", "sovereignty"],
+    "CommercialLaw":        ["commerce", "contract", "sale of goods", "company", "partnership", "arbitration", "mercantile"],
+    "BankingAndFinance":    ["bank", "banking", "financial institution", "loan", "credit", "monetary", "interest"],
+    "TaxLaw":               ["tax", "revenue", "customs", "excise", "vat", "income tax", "duty", "tariff"],
+    "LabourLaw":            ["labour", "labor", "employment", "worker", "factory", "wages", "trade union"],
+    "FamilyLaw":            ["marriage", "divorce", "matrimonial", "guardian", "inheritance", "succession", "dower"],
+    "PropertyLaw":          ["property", "land", "tenancy", "mortgage", "transfer of property", "registration"],
+    "EvidenceLaw":          ["evidence", "witness", "proof", "admissibility"],
+    "ProceduralLaw":        ["procedure code", "jurisdiction", "appeal", "tribunal", "high court", "supreme court"],
+    "EnvironmentalLaw":     ["environment", "pollution", "forest", "wildlife", "biodiversity", "conservation"],
+    "EducationLaw":         ["education", "university", "school", "examination", "academic", "degree"],
+    "HealthLaw":            ["health", "medical", "hospital", "drug", "medicine", "pharmacy", "epidemic"],
+    "AdministrativeLaw":    ["government", "administration", "ministry", "officer", "public servant", "gazette"],
+    "MilitaryLaw":          ["army", "navy", "air force", "military", "armed forces", "defence"],
+    "SecurityLaw":          ["security", "national security", "intelligence", "police", "special branch"],
+    "ImmigrationLaw":       ["passport", "visa", "immigration","citizenship", "nationality", "refugee"],
+    "InsuranceLaw":         ["insurance", "insurer", "policy", "indemnity", "premium"],
+    "IntellectualProperty": ["copyright", "patent", "trademark", "intellectual property", "design"],
 }
 
 # ---------------------------------------------------------------------------
@@ -231,6 +271,14 @@ _TAG_KEYWORDS: dict[str, list[str]] = {
 
 
 def setup_logging(verbose: bool) -> logging.Logger:
+    """@brief Configure root logger and return the 'bdlaw' logger.
+
+    Uses RichHandler for coloured output when the rich package is available,
+    otherwise falls back to a plain timestamped format.
+
+    @param verbose Enable DEBUG level; INFO otherwise.
+    @return Configured Logger instance.
+    """
     level = logging.DEBUG if verbose else logging.INFO
     if _RICH:
         logging.basicConfig(
@@ -251,6 +299,13 @@ def setup_logging(verbose: bool) -> logging.Logger:
 
 @dataclass
 class SectionItem:
+    """A single numbered or unnumbered section of an act.
+
+    @param heading  Human-readable heading text (e.g. "Short title").
+    @param url      Absolute URL to this section's permalink page.
+    @param html     BeautifulSoup Tag for the section body HTML (div.txt-details).
+    @param number   Parsed section number string (e.g. "4A", "৩"), or None.
+    """
     heading: str
     url: str
     html: Tag
@@ -259,12 +314,24 @@ class SectionItem:
 
 @dataclass
 class ChapterItem:
+    """A chapter heading node (e.g. "CHAPTER II: General Principles").
+
+    @param name  Full chapter label including number and title.
+    @param url   Link to chapter page, or "#" if not resolved.
+    """
     name: str
     url: str = "#"
 
 
 @dataclass
 class SubChapterItem:
+    """A lettered sub-chapter or thematic grouping within a chapter.
+
+    @param letter         Single letter identifying the sub-chapter (e.g. "A").
+    @param subtitle       Descriptive title of the sub-chapter.
+    @param parent_number  Section number of the preceding section.
+    @param url            Link, or "#" if not resolved.
+    """
     letter: str
     subtitle: str
     parent_number: str
@@ -273,21 +340,36 @@ class SubChapterItem:
 
 @dataclass
 class PartItem:
+    """A top-level Part of an act (e.g. "PART III: Administration").
+
+    @param name  Full label including part number and subtitle.
+    @param url   Absolute URL to the part page.
+    """
     name: str
     url: str
 
 
 @dataclass
 class PreambleItem:
+    """The preamble text of an act, rendered as a Preamble callout.
+
+    @param text  Cleaned plain-text preamble (no HTML, no footnote markers).
+    """
     text: str
 
 
 @dataclass
 class FootnotesItem:
+    """All footnotes for an act, rendered as a Footnotes section.
+
+    @param notes  List of (footnote_number, markdown_text) pairs.
+                  Links inside notes are already converted to [[wikilinks]].
+    """
     notes: list[tuple[int, str]]
 
 
 DocNode = PartItem | ChapterItem | SubChapterItem | SectionItem | PreambleItem | FootnotesItem
+"""Union type representing every possible structural node of an act document."""
 
 
 # ---------------------------------------------------------------------------
@@ -296,12 +378,28 @@ DocNode = PartItem | ChapterItem | SubChapterItem | SectionItem | PreambleItem |
 
 
 class Scraper:
+    """Rate-limited HTTP client with exponential-backoff retry and disk cache.
+
+    Enforces a minimum delay between requests so the bdlaws server is not
+    overwhelmed, especially during parallel batch scraping. The optional disk
+    cache stores raw HTML keyed by URL so repeated runs skip live requests.
+    """
+
     def __init__(self, delay: float = 0.3, max_retries: int = 4,
-                 timeout: int = 30, cache_dir: Optional[Path] = None) -> None:
+                 timeout: int = 30, cache_dir: Optional[Path] = None,
+                 force_refresh: bool = False) -> None:
+        """@param delay         Minimum seconds to wait between HTTP requests.
+        @param max_retries     Maximum retry attempts on RequestException.
+        @param timeout         Per-request socket timeout in seconds.
+        @param cache_dir       Directory for raw HTML cache; None disables caching.
+        @param force_refresh   Ignore cache hits and always fetch live.
+        """
         self.delay = delay
         self.timeout = timeout
         self.cache_dir = cache_dir
+        self.force_refresh = force_refresh
         self._last_request = 0.0
+        self._rate_lock = threading.Lock()
         self.session = requests.Session()
         self.session.headers.update(HEADERS)
         if cache_dir:
@@ -315,19 +413,37 @@ class Scraper:
         )(self._fetch_raw_inner)
 
     def _fetch_raw_inner(self, url: str) -> str:
-        elapsed = time.monotonic() - self._last_request
-        if elapsed < self.delay:
-            time.sleep(self.delay - elapsed)
+        """Perform a single throttled GET request and return the response body.
+
+        Rate limiting is protected by _rate_lock so concurrent callers on the
+        same Scraper instance serialize their delay checks.
+
+        @param url  Absolute URL to fetch.
+        @return     Response body as a string.
+        @raises requests.HTTPError  On 4xx/5xx responses.
+        """
+        with self._rate_lock:
+            elapsed = time.monotonic() - self._last_request
+            if elapsed < self.delay:
+                time.sleep(self.delay - elapsed)
+            self._last_request = time.monotonic()
         resp = self.session.get(url, timeout=self.timeout)
         resp.raise_for_status()
-        self._last_request = time.monotonic()
         return resp.text
 
     def fetch(self, url: str) -> BeautifulSoup:
+        """Fetch a URL and return a parsed BeautifulSoup tree.
+
+        Reads from the disk cache if available; otherwise fetches live and
+        writes the result to the cache.
+
+        @param url  Absolute URL to fetch.
+        @return     Parsed HTML tree.
+        """
         if self.cache_dir:
             cache_key = re.sub(r"[^\w]", "_", url) + ".html"
             cache_file = self.cache_dir / cache_key
-            if cache_file.exists():
+            if cache_file.exists() and not self.force_refresh:
                 logging.getLogger("bdlaw").debug("Cache hit: %s", url)
                 return BeautifulSoup(cache_file.read_text(encoding="utf-8"), "lxml")
         html = self._fetch_raw(url)
@@ -342,6 +458,20 @@ class Scraper:
 
 
 def _tag_to_md_text(node: object, scraper: Optional[Scraper] = None) -> str:
+    """Recursively convert a BeautifulSoup node to Markdown text.
+
+    Handles the following cases:
+    - NavigableString  → NFC-normalised plain text.
+    - <br>             → newline.
+    - <a href="...">   → [[act-N\\|text]] wikilink for bdlaws internal links,
+                         [num] bare ref for digit-only anchors, [text](url) otherwise.
+    - Block elements   → wrapped with leading/trailing newlines.
+    - All others       → recurse into children, concatenate.
+
+    @param node     A BeautifulSoup Tag or NavigableString.
+    @param scraper  Unused; reserved for future authenticated fetches.
+    @return         Markdown string representation of the node subtree.
+    """
     if isinstance(node, NavigableString):
         return unicodedata.normalize("NFC", str(node))
     if not hasattr(node, "name") or not node.name:
@@ -359,7 +489,7 @@ def _tag_to_md_text(node: object, scraper: Optional[Scraper] = None) -> str:
             m = _RE_BDLAWS_ACT.match(full_href)
             if m:
                 clean_text = re.sub(r'[\].]+$', '', text).strip()
-                return f"[[act-{m.group(1)}|{clean_text}]]"
+                return f"[[act-{m.group(1)}\\|{clean_text}]]"
             if re.fullmatch(r"\d+", text):
                 return f"[{text}]"
             return f"[{text}]({full_href})"
@@ -376,31 +506,45 @@ def _tag_to_md_text(node: object, scraper: Optional[Scraper] = None) -> str:
 
 
 def _normalise(text: str) -> str:
+    """Return NFC-normalised Unicode string."""
     return unicodedata.normalize("NFC", text)
 
 
 def _get_text(tag: Tag) -> str:
+    """Extract all text from a Tag using newline as separator, then NFC-normalise."""
     return _normalise(tag.get_text(separator="\n"))
 
 
-def _bn_digits_to_int(s: str) -> Optional[int]:
-    try:
-        return int(s.translate(BENGALI_DIGIT_MAP))
-    except (ValueError, AttributeError):
-        return None
-
-
 def _normalize_secnum(num: str) -> str:
+    """Collapse trailing hyphen-suffix into the number (e.g. '4-A' → '4A')."""
     return re.sub(r"-([A-Za-z0-9]+)$", r"\1", num)
 
 
 def _secnum_to_block_id(num: str) -> str:
+    """Convert a section number to a lowercase alphanumeric Obsidian block ID.
+
+    Bengali digits are translated to ASCII, Bengali consonants to their
+    _BN_LETTER_TO_LATIN equivalents, and all non-alphanumeric characters dropped.
+    Example: '৪ক' → '4a', '3A' → '3a'.
+
+    @param num  Raw section number string (may contain Bengali digits/letters).
+    @return     Lowercase ASCII block ID suitable for ^sec-<id> anchors.
+    """
     result = num.translate(BENGALI_DIGIT_MAP)
     result = "".join(_BN_LETTER_TO_LATIN.get(ch, ch) for ch in result)
     return re.sub(r"[^a-z0-9]", "", result.lower())
 
 
 def extract_section_number(raw_text: str) -> Optional[str]:
+    """Parse the section number from the raw text of a section body.
+
+    Strips standalone digit lines (page numbers), footnote markers, and
+    leading punctuation before trying patterns for both Bengali and Latin
+    section numbering schemes (bracketed, plain, and clause forms).
+
+    @param raw_text  Raw get_text() output from a div.txt-details element.
+    @return          Normalised section number string, or None if not detected.
+    """
     cleaned = "\n".join(
         line for line in raw_text.splitlines()
         if not re.fullmatch(r"\s*[\d\u09E6-\u09EF]+\s*", line)
@@ -420,6 +564,15 @@ def extract_section_number(raw_text: str) -> Optional[str]:
 
 
 def parse_footnotes(soup: BeautifulSoup) -> Optional[FootnotesItem]:
+    """Extract all footnotes from a div.footnoteListAll container.
+
+    Each li.footnoteList is expected to contain an h6 > sup with the footnote
+    number, followed by mixed content (text nodes and <a> links). Links are
+    converted to [[wikilinks]] via _tag_to_md_text.
+
+    @param soup  BeautifulSoup tree of the print page.
+    @return      FootnotesItem with (number, markdown_text) pairs, or None.
+    """
     container = soup.find("div", class_="footnoteListAll")
     if not container:
         return None
@@ -436,14 +589,125 @@ def parse_footnotes(soup: BeautifulSoup) -> Optional[FootnotesItem]:
         for node in li.children:
             if hasattr(node, "name") and node.name == "h6":
                 continue
-            parts.append(node.get_text() if hasattr(node, "get_text") else str(node))
-        text = _normalise(" ".join(" ".join(parts).split()))
+            parts.append(_tag_to_md_text(node))
+        text = _normalise(re.sub(r'[\xa0​\s]+', ' ', "".join(parts)).strip())
         if text:
             notes.append((num, text))
     return FootnotesItem(notes=notes) if notes else None
 
 
+def parse_act_date(soup: BeautifulSoup) -> Optional[str]:
+    """Parse the enacted date from the site's publish-date paragraph.
+
+    Handles two formats:
+    - Bengali digits: "[ ১০ এপ্রিল, ২০২৬ ]"  → "2026-04-10"
+    - English ordinal: "[ 11th September, 1836 ]" → "1836-09-11"
+
+    @param soup  BeautifulSoup tree of the ToC or print page.
+    @return      ISO 8601 date string (YYYY-MM-DD), or None if not found/parseable.
+    """
+    p = soup.find("p", class_="publish-date")
+    if not p:
+        return None
+    raw = re.sub(r"[\[\]\s]+", " ", p.get_text()).strip()
+    # Bengali digits: "১০ এপ্রিল, ২০২৬"
+    m = re.match(r"([০-৯]+)\s+(\S+?)(?:,\s*|\s+)([০-৯]+)\s*$", raw)
+    if m:
+        month_num = _BN_MONTH_MAP.get(m.group(2).strip(","))
+        if month_num:
+            try:
+                day  = int(m.group(1).translate(BENGALI_DIGIT_MAP))
+                year = int(m.group(3).translate(BENGALI_DIGIT_MAP))
+                return f"{year:04d}-{month_num:02d}-{day:02d}"
+            except ValueError:
+                pass
+    # English: "11th September, 1836"
+    m = re.match(r"(\d+)(?:st|nd|rd|th)?\s+(\w+?)(?:,\s*|\s+)(\d+)\s*$", raw, re.IGNORECASE)
+    if m:
+        month_num = _EN_MONTH_MAP.get(m.group(2).lower())
+        if month_num:
+            try:
+                day  = int(m.group(1))
+                year = int(m.group(3))
+                return f"{year:04d}-{month_num:02d}-{day:02d}"
+            except ValueError:
+                pass
+    return None
+
+
+def _parse_date_from_preamble_text(text: str) -> Optional[str]:
+    """Extract an enacted date embedded in preamble prose.
+
+    Tries patterns from most to least specific:
+    1. "corresponding to the fourth day of November, 1972"
+    2. "the fourth day of November, 1972 A.D."
+    3. "the fourth day of November, 1972"
+
+    Day can be a word ordinal ("fourth") or a numeric ordinal ("4th").
+    Only recognises English month names; skips Bengali calendar months.
+
+    @param text  Cleaned preamble text.
+    @return      ISO 8601 date string (YYYY-MM-DD), or None if not found.
+    """
+    patterns = [
+        r'corresponding\s+to\s+the\s+([\w-]+)\s+day\s+of\s+(\w+),?\s+(\d{4})',
+        r'\bthe\s+([\w-]+)\s+day\s+of\s+(\w+),?\s+(\d{4})\s+A\.?D\.?',
+        r'\bthe\s+([\w-]+)\s+day\s+of\s+(\w+),?\s+(\d{4})',
+    ]
+    for pat in patterns:
+        for m in re.finditer(pat, text, re.IGNORECASE):
+            day_raw   = m.group(1).lower()
+            month_num = _EN_MONTH_MAP.get(m.group(2).lower())
+            if not month_num:
+                continue
+            day = _ORDINAL_WORDS.get(day_raw)
+            if day is None:
+                nm = re.match(r'(\d+)(?:st|nd|rd|th)?$', day_raw)
+                if nm:
+                    day = int(nm.group(1))
+            if day and 1 <= day <= 31:
+                try:
+                    return f"{int(m.group(3)):04d}-{month_num:02d}-{day:02d}"
+                except ValueError:
+                    pass
+    return None
+
+
+def parse_act_description(soup: BeautifulSoup) -> str:
+    """Return the meta description content from a page, trying common tag variants.
+
+    Tries in order: name=description, name=Description, property=og:description,
+    name=og:description. Returns the first non-empty content found, normalised
+    to a single space-separated line.
+
+    @param soup  BeautifulSoup tree of the ToC page.
+    @return      Description string, or "" if none found.
+    """
+    for attrs in (
+        {"name": "description"},
+        {"name": "Description"},
+        {"property": "og:description"},
+        {"name": "og:description"},
+    ):
+        meta = soup.find("meta", attrs=attrs)
+        if meta:
+            content = meta.get("content", "").strip()
+            if content:
+                return " ".join(content.split())
+    return ""
+
+
 def parse_toc(soup: BeautifulSoup, base: str) -> dict[str, str]:
+    """Build a heading → absolute-URL map from the act's table of contents page.
+
+    Finds all p.act-section-name links inside section.search-here and resolves
+    relative hrefs against base.
+
+    @param soup  BeautifulSoup tree of the ToC page (act-N.html).
+    @param base  Base URL for resolving relative links (BASE_URL).
+    @return      Dict mapping section heading text to its absolute URL.
+    @raises ValueError  If section.search-here is not found.
+    """
     container = soup.find("section", class_="search-here")
     if not container:
         raise ValueError("ToC page: cannot find '.search-here' container")
@@ -457,6 +721,14 @@ def parse_toc(soup: BeautifulSoup, base: str) -> dict[str, str]:
 
 
 def parse_act_title(soup: BeautifulSoup) -> str:
+    """Extract the act title from the section.bg-act-section h3 element.
+
+    Strips footnote markers (e.g. "[1]"), outer brackets, and leading
+    numeric prefixes that appear in the site's OCR output.
+
+    @param soup  BeautifulSoup tree of either the ToC or print page.
+    @return      Clean title string, or "" if not found.
+    """
     section = soup.find("section", class_="bg-act-section")
     if section:
         h3 = section.find("h3")
@@ -470,6 +742,15 @@ def parse_act_title(soup: BeautifulSoup) -> str:
 
 
 def _extract_title_footnote_num(soup: BeautifulSoup) -> Optional[int]:
+    """Return the footnote number embedded in the act title h3, if any.
+
+    The site sometimes encodes a footnote reference directly in the title
+    as a leading digit prefix (e.g. "7The Penal Code"). This number is
+    appended as [^N] to the rendered Markdown title.
+
+    @param soup  BeautifulSoup tree of the ToC or print page.
+    @return      Footnote number integer, or None.
+    """
     section = soup.find("section", class_="bg-act-section")
     if section:
         h3 = section.find("h3")
@@ -485,6 +766,11 @@ def _extract_title_footnote_num(soup: BeautifulSoup) -> Optional[int]:
 
 
 def _clean_heading(raw: str) -> str:
+    """Remove footnote markers, outer brackets, and section-number prefixes from a heading string.
+
+    @param raw  Raw heading text from div.txt-head.
+    @return     Cleaned heading suitable for use in Markdown headings.
+    """
     h = _RE_HEADING_FOOTNOTE.sub(r"\2", raw).strip()
     if h.startswith("[") and h.endswith("]"):
         h = h[1:-1].strip()
@@ -494,6 +780,17 @@ def _clean_heading(raw: str) -> str:
 
 
 def parse_preamble(soup: BeautifulSoup) -> str:
+    """Extract and clean the preamble text of an act.
+
+    Searches for div.preamble-content first, then falls back to the first
+    section.padding-bottom-20 that is neither the striped body nor the title
+    block. Post-processing strips footnote/omission markers, standalone digit
+    lines (page numbers), annotation brackets, and joins continuation lines
+    split across paragraph elements.
+
+    @param soup  BeautifulSoup tree of the ToC or print page.
+    @return      Cleaned multi-line preamble string, or "" if not found.
+    """
     preamble_div = soup.find("div", class_="preamble-content")
     if not preamble_div:
         for sec in soup.find_all("section", class_="padding-bottom-20"):
@@ -540,6 +837,23 @@ def parse_preamble(soup: BeautifulSoup) -> str:
 
 
 def parse_detail(soup: BeautifulSoup, base: str) -> Generator[DocNode, None, None]:
+    """Yield DocNode items by walking the print page's structured layout.
+
+    The print page (act-print-N.html) wraps content in div.row elements inside
+    section.padding-bottom-20.bg-striped. Each row may contain:
+    - div.act-part-group   → PartItem
+    - div.act-chapter-group → ChapterItem
+    - p.act-section-head   → SubChapterItem
+    - div.txt-details      → SectionItem (with optional div.txt-head heading)
+
+    Boilerplate rows (CONTENTS tables, URL-only rows) are silently skipped.
+    Yields nodes in document order.
+
+    @param soup  BeautifulSoup tree of the print page.
+    @param base  Base URL for resolving relative hrefs.
+    @return      Generator of DocNode instances.
+    @raises ValueError  If the main container is not found.
+    """
     container = soup.find("section", class_="padding-bottom-20 bg-striped")
     if not container:
         raise ValueError("Detail page: cannot find main container")
@@ -595,6 +909,16 @@ def parse_detail(soup: BeautifulSoup, base: str) -> Generator[DocNode, None, Non
 
 
 def resolve_urls(nodes: list[DocNode], toc_map: dict[str, str], base: str) -> list[DocNode]:
+    """Resolve "#" placeholder URLs in SectionItems using the ToC heading map.
+
+    First tries an exact case-insensitive match; if that fails, tries substring
+    and suffix matching. Mutates nodes in place.
+
+    @param nodes    List of DocNode items from parse_detail.
+    @param toc_map  Heading → URL dict from parse_toc.
+    @param base     Base URL (unused here, kept for API symmetry).
+    @return         The same nodes list (mutated).
+    """
     lower_map = {k.lower(): v for k, v in toc_map.items()}
     for node in nodes:
         if isinstance(node, SectionItem) and node.url == "#":
@@ -615,6 +939,15 @@ def resolve_urls(nodes: list[DocNode], toc_map: dict[str, str], base: str) -> li
 
 
 def _transform_footnotes(text: str) -> str:
+    """Convert inline footnote markers to Markdown footnote reference syntax.
+
+    - "[**]" / "[***]" → "[ * * * ]"  (omission placeholder)
+    - "[N]"            → "[^N]"        (numbered footnote reference)
+    - "^word^"         → ""            (superscript noise from OCR)
+
+    @param text  Raw section text.
+    @return      Text with footnote markers normalised.
+    """
     text = re.sub(r"\[\*+(?:\s*\*+)+\]", "[ * * * ]", text)
     text = re.sub(r"\[(\d+)\]", r"[^\1]", text)
     text = re.sub(r"\^\S+\^", "", text)
@@ -629,6 +962,16 @@ _RE_OMITTED_TERM    = re.compile(
 
 
 def _resolve_omissions(text: str, footnote_map: dict) -> str:
+    """Replace [^N][ * * * ] omission markers with the original omitted term.
+
+    Looks up footnote N in footnote_map; if the footnote text matches the
+    pattern 'The word "X" was omitted', renders [^N][~~"X"~~ omitted].
+    Falls back to [^N][omitted] when the term cannot be extracted.
+
+    @param text          Section Markdown text after footnote transformation.
+    @param footnote_map  Dict of footnote_number → footnote_text.
+    @return              Text with omission markers resolved.
+    """
     def replace(m: re.Match) -> str:
         num  = int(m.group(1))
         note = footnote_map.get(num, "")
@@ -643,7 +986,16 @@ _RE_LEADING_FN = re.compile(r'^(\[\^\d+\])\s*(?!\[)(?!:)', re.MULTILINE)
 
 
 def _relocate_leading_footnotes(text: str) -> str:
-    """Move [^N] from paragraph start to paragraph end."""
+    """Move [^N] footnote refs from paragraph start to end of that paragraph.
+
+    The site sometimes places editorial footnote markers before the text they
+    annotate. Obsidian renders them better at the end of the annotated passage.
+    Skips relocation when [^N] is followed by "[" (i.e. it's part of an
+    omission construct) or ":" (i.e. it's a footnote definition).
+
+    @param text  Section Markdown text.
+    @return      Text with leading footnote refs relocated to paragraph ends.
+    """
     lines = text.splitlines()
     out: list[str] = []
     i = 0
@@ -669,29 +1021,49 @@ def _relocate_leading_footnotes(text: str) -> str:
 
 
 def _handle_annotation_bracket(m: re.Match) -> str:
-    """Strip annotation brackets returning plain content (no highlighting)."""
+    """Return the inner content of an [annotation] bracket, whitespace-collapsed."""
     return " ".join(m.group(1).split())
 
 
 _RE_WIKILINK = re.compile(r"\[\[([^\]]+)\]\]")
 
+
 def _strip_annotation_brackets(text: str) -> str:
-    """Strip editorial [annotation] brackets while preserving [[wikilinks]]."""
-    # Phase 1: replace wikilinks with placeholders
+    """Strip editorial [annotation] brackets while preserving [[wikilinks]].
+
+    Uses a stash-and-restore strategy so that _RE_ANNOTATION_BRACKETS never
+    sees the interior of a wikilink:
+    1. Replace all [[...]] with NUL-delimited placeholders.
+    2. Apply _RE_ANNOTATION_BRACKETS to strip [editorial] brackets.
+    3. Restore wikilinks from the stash.
+
+    @param text  Markdown text that may contain both [[wikilinks]] and
+                 [editorial annotations].
+    @return      Text with annotation brackets stripped, wikilinks intact.
+    """
     wikilinks: list[str] = []
+
     def _stash(m: re.Match) -> str:
         wikilinks.append(m.group(0))
         return f"\x00wl{len(wikilinks)-1}\x00"
+
     text = _RE_WIKILINK.sub(_stash, text)
-    # Phase 2: strip annotation brackets (now safe — no [[ or ]] inside)
     text = _RE_ANNOTATION_BRACKETS.sub(_handle_annotation_bracket, text)
-    # Phase 3: restore wikilinks
     for i, wl in enumerate(wikilinks):
         text = text.replace(f"\x00wl{i}\x00", wl)
     return text
 
 
 def _strip_leading_section_num(text: str) -> str:
+    """Remove the section number prefix from the start of section body text.
+
+    Preserves any leading [^N] footnote ref so it can be relocated later.
+    Handles Bengali and Latin numbering in plain, bracketed, and clause forms.
+
+    @param text  Raw section body text (already NFC-normalised).
+    @return      Text with the leading section number stripped, or the original
+                 text unchanged if no recognised pattern is found.
+    """
     stripped = text.lstrip()
     fn_prefix = ""
     m_fn = _RE_FN_PREFIX.match(stripped)
@@ -725,6 +1097,15 @@ def _strip_leading_section_num(text: str) -> str:
 
 
 def _strip_outer_brackets(text: str) -> str:
+    """Strip a single pair of wrapping square brackets if they span the full text.
+
+    Uses a depth counter to ensure only truly enclosing brackets are removed.
+    A bracket pair like "[a] or [b]" is left intact because the first [ closes
+    before the end of the string.
+
+    @param text  Stripped text to examine.
+    @return      Unwrapped text, or the original if not fully wrapped.
+    """
     text = text.strip()
     if not text.startswith("[") or not text.endswith("]"):
         return text
@@ -740,6 +1121,14 @@ def _strip_outer_brackets(text: str) -> str:
 
 
 def _join_isolated_labels(text: str) -> str:
+    """Join an isolated list label like "(a)" onto the following content line.
+
+    Prevents the formatter from treating a label that appears alone on a line
+    (due to HTML structure) as a new list item without content.
+
+    @param text  Section text after footnote and bracket transforms.
+    @return      Text with isolated labels merged onto their following line.
+    """
     lines = text.splitlines()
     out: list[str] = []
     i = 0
@@ -758,6 +1147,14 @@ def _join_isolated_labels(text: str) -> str:
 
 
 def _is_block_break(s: str) -> bool:
+    """Return True if the line starts a new logical block that should not be merged.
+
+    Used by continuation-joining functions to stop merging when they hit a
+    callout header, list item, ordinal item, or margin note.
+
+    @param s  A single stripped line of text.
+    @return   True if the line starts a new block.
+    """
     return bool(
         s.startswith("**") or s.startswith(">") or s.startswith("#")
         or _classify_item(s) is not None
@@ -771,6 +1168,15 @@ def _is_block_break(s: str) -> bool:
 
 
 def _join_fragment_lines(text: str) -> str:
+    """Merge lines that start with a connector word ("or", "and", "namely", etc.)
+    onto the preceding line, then absorb the following non-block line too.
+
+    Handles the site's habit of splitting "..., or" / "..., and" / "..., namely:"
+    across separate paragraph elements.
+
+    @param text  Section text after label joining.
+    @return      Text with connector-led fragments merged.
+    """
     lines = text.splitlines()
     out: list[str] = []
     i = 0
@@ -790,6 +1196,14 @@ def _join_fragment_lines(text: str) -> str:
 
 
 def _strip_unmatched_open_brackets(text: str) -> str:
+    """Remove a leading "[" from lines where it has no closing "]" on the same line.
+
+    Targets orphaned annotation bracket openers left after annotation stripping.
+    Preserves [^N] footnote refs, [* * *] omission markers, and [[wikilinks]].
+
+    @param text  Section text.
+    @return      Text with unmatched leading brackets removed.
+    """
     lines = text.splitlines()
     out = []
     for line in lines:
@@ -806,6 +1220,11 @@ def _strip_unmatched_open_brackets(text: str) -> str:
 
 
 def _check_section_status(raw: str) -> Optional[str]:
+    """Check if an entire section body is an omitted/repealed status marker.
+
+    @param raw  Full stripped section body text.
+    @return     A pre-formatted Obsidian Warning callout string, or None.
+    """
     s = raw.strip()
     if _RE_STATUS_OMITTED.match(s):
         return "> [!Warning] Omitted\n> This section has been omitted."
@@ -815,9 +1234,14 @@ def _check_section_status(raw: str) -> Optional[str]:
 
 
 def _classify_item(line: str) -> Optional[str]:
-    """
-    Classify a line as a list item type, or None if not a list item.
-    Strips ALL leading [^N] refs then a bare [ wrapper before classifying.
+    """Classify a line as a list item type, or None if not a list item.
+
+    Strips leading [^N] footnote refs and a bare "[" wrapper before pattern
+    matching so items like "[^7](a) text" are correctly classified.
+
+    @param line  A single line of section text.
+    @return      One of "decimal", "alpha", "roman", "bn_decimal", "bn_alpha",
+                 "bn_vowel", or None.
     """
     s = line.strip()
     s = re.sub(r'^(\[\^\d+\]\s*)+', '', s)
@@ -837,7 +1261,11 @@ def _classify_item(line: str) -> Optional[str]:
 
 
 def _extract_item_content(line: str) -> str:
-    """Strip the list marker, preserving ALL leading [^N] refs."""
+    """Strip the list marker from a line, preserving all leading [^N] footnote refs.
+
+    @param line  A line classified as a list item by _classify_item.
+    @return      The item's text content without its "(marker)" prefix.
+    """
     s = line.strip()
     fn_prefix = ""
     while True:
@@ -940,10 +1368,9 @@ def convert_lists(text: str) -> str:
     out: list[str] = []
     i = 0
     n = len(lines)
-    counts: dict[int, int] = {}   # running item count per depth
+    counts: dict[int, int] = {}
     last_was_list = False
 
-    # Detect primary list type from first list item to set context-aware depths
     first_lt = None
     for _line in lines:
         _lt = _classify_item(_line)
@@ -980,9 +1407,8 @@ def convert_lists(text: str) -> str:
 
         depth = effective_depth.get(lt, 1)
         pad   = " " * (_LIST_INDENT * (depth - 1))
-        cpad  = " " * (_LIST_INDENT * depth)          # continuation indent
+        cpad  = " " * (_LIST_INDENT * depth)
 
-        # Reset item counts for depths deeper than current (we returned to a parent)
         for d in list(counts.keys()):
             if d > depth:
                 del counts[d]
@@ -993,12 +1419,11 @@ def convert_lists(text: str) -> str:
         first = _extract_item_content(lines[i])
         i += 1
 
-        # Collect continuation lines for this item
         continuation: list[str] = []
         while i < n:
             next_lt = _classify_item(lines[i])
             if next_lt is not None:
-                break   # next list item
+                break
             curr_s = lines[i].strip()
             if _is_block_break(curr_s) and curr_s:
                 break
@@ -1016,37 +1441,43 @@ def convert_lists(text: str) -> str:
                     continuation.append(curr_s)
                 i += 1
             else:
-                # blank line: peek ahead
                 j = i + 1
                 while j < n and not lines[j].strip():
                     j += 1
                 ns = lines[j].strip() if j < n else ""
                 if _classify_item(ns) is not None:
-                    break  # next list item follows
+                    break
                 elif ns and not _is_block_break(ns):
                     last_c = next((c for c in reversed(continuation) if c), first)
                     lw = re.search(r'\b(\w+)\W*$', last_c.rstrip())
                     lw_str = lw.group(1).lower() if lw else ''
                     if lw_str in _CANNOT_END_SENTENCE_WORDS:
-                        i = j  # skip blank(s); continuation collected next iter
+                        i = j
                     else:
-                        continuation.append("")  # preserve paragraph break in item
+                        continuation.append("")
                         i += 1
                 else:
                     break
 
-        out.append(f"{pad}{idx}. {first}")
+        full_item = first
         for cont_line in continuation:
             if cont_line:
-                out.append(f"{cpad}{cont_line}")
-            else:
-                out.append("")
+                full_item = full_item.rstrip() + ' ' + cont_line
+        out.append(f"{pad}{idx}. {full_item}")
         last_was_list = True
 
     return "\n".join(out)
 
 
 def _convert_provided(text: str) -> str:
+    """Format "Provided that..." and ordinal item lines as bold inline headings.
+
+    - Standalone "Provided that —" lines become **Provided that**:
+    - "Firstly—", "Secondly—", etc. become **Firstly**: content
+
+    @param text  Section text after sentence-continuation joining.
+    @return      Text with proviso/ordinal lines reformatted.
+    """
     lines = text.splitlines()
     out: list[str] = []
     i = 0
@@ -1075,6 +1506,20 @@ def _convert_provided(text: str) -> str:
 def _convert_numbered_callout(
     text: str, re_numbered: re.Pattern, re_single: re.Pattern, callout_name: str
 ) -> str:
+    """Convert numbered Explanation/Exception blocks to Obsidian numbered callouts.
+
+    Matches lines like "Explanation I— ..." or "Exception 1— ...", collects
+    all consecutive numbered items, and wraps them in a "> [!callout_name]"
+    block with "1. item" list formatting. Runs convert_lists on each item
+    content to handle nested sub-lists within the callout.
+
+    @param text          Section text.
+    @param re_numbered   Pattern matching "Name N— content" (the numbered form).
+    @param re_single     Pattern matching "Name— content" (the single form,
+                         used to distinguish from numbered; not consumed here).
+    @param callout_name  Obsidian callout type string (e.g. "Explanation").
+    @return              Text with matching blocks replaced by callout syntax.
+    """
     lines = text.splitlines()
     out: list[str] = []
     i = 0
@@ -1118,7 +1563,6 @@ def _convert_numbered_callout(
         if fn_prefix:
             out.append(f"> {fn_prefix}")
         for idx, item in enumerate(items, 1):
-            # Also run convert_lists on item content for any sub-lists
             converted = convert_lists(item.strip())
             item_lines = converted.splitlines()
             if item_lines:
@@ -1131,6 +1575,18 @@ def _convert_numbered_callout(
 def _convert_single_callout(
     text: str, re_single: re.Pattern, re_numbered: re.Pattern, callout_name: str
 ) -> str:
+    """Convert a single-instance Explanation/Exception line to an Obsidian callout.
+
+    Only processes lines that match re_single but NOT re_numbered (numbered
+    form is handled by _convert_numbered_callout). Collects continuation lines
+    until the next block break.
+
+    @param text          Section text (after numbered callouts are already removed).
+    @param re_single     Pattern matching "Name— content" (single form).
+    @param re_numbered   Pattern for the numbered form (to avoid double-matching).
+    @param callout_name  Obsidian callout type string.
+    @return              Text with single-instance callouts wrapped.
+    """
     lines = text.splitlines()
     out: list[str] = []
     i = 0
@@ -1155,6 +1611,11 @@ def _convert_single_callout(
 
 
 def _wrap_illustrations_callout(text: str) -> str:
+    """Wrap "Illustration(s)—" header and its following lines in an Obsidian callout.
+
+    @param text  Section text after exception/explanation callouts are processed.
+    @return      Text with illustrations wrapped in "> [!Illustrations]" blocks.
+    """
     lines = text.splitlines()
     out: list[str] = []
     i = 0
@@ -1174,18 +1635,26 @@ def _wrap_illustrations_callout(text: str) -> str:
 
 
 def _nest_secondary_callouts(text: str) -> str:
-    _RE_EXPL_START    = re.compile(r"^> \[!Explanation\]$")
-    _RE_SECONDARY_HDR = re.compile(r"^> \[!(Illustrations?|Exception[s]?)\]$")
+    """Nest Illustrations/Exception callouts that appear inside an Explanation callout.
+
+    The site occasionally places an Illustration or Exception block immediately
+    after an Explanation. Obsidian renders nested callouts with an extra leading
+    "> " prefix. This function adds that prefix when an Explanation callout is
+    directly followed by an Illustrations or Exception callout.
+
+    @param text  Section text after all callout wrapping.
+    @return      Text with nested secondary callouts indented.
+    """
     lines = text.splitlines()
     out   = []
     i     = 0
     while i < len(lines):
-        if _RE_EXPL_START.match(lines[i]):
+        if _RE_NEST_EXPL_START.match(lines[i]):
             out.append(lines[i])
             i += 1
             while i < len(lines):
                 curr = lines[i]
-                if _RE_SECONDARY_HDR.match(curr):
+                if _RE_NEST_SECONDARY_HDR.match(curr):
                     out.append("> " + curr)
                     i += 1
                     while i < len(lines) and lines[i].startswith("> "):
@@ -1213,6 +1682,14 @@ def _nest_secondary_callouts(text: str) -> str:
 
 
 def _convert_margin_callouts(text: str) -> str:
+    """Convert margin-note keywords to Obsidian callouts using _MARGIN_CALLOUTS rules.
+
+    Matches: Saving, Repeal, Commencement, Short title — each mapped to a
+    specific callout type (Note/Warning/Info).
+
+    @param text  Section text.
+    @return      Text with margin-note lines replaced by callout blocks.
+    """
     lines = text.splitlines()
     out   = []
     i     = 0
@@ -1239,6 +1716,14 @@ def _convert_margin_callouts(text: str) -> str:
 
 
 def _convert_definitions(text: str) -> str:
+    """Wrap lines matching the definition pattern in a Definition callout.
+
+    Matches: 'In this Act, "term" means content' or '"term" means content'.
+    Renders as "> [!Definition]\\n> **term** means content".
+
+    @param text  Section text.
+    @return      Text with definition lines wrapped in callout blocks.
+    """
     lines = text.splitlines()
     out   = []
     for line in lines:
@@ -1255,16 +1740,37 @@ def _convert_definitions(text: str) -> str:
 
 
 def _bold_punishment_keywords(text: str) -> str:
+    """Wrap punishment-related phrases in **bold** for visual emphasis.
+
+    @param text  Section text.
+    @return      Text with phrases like "shall be punished with" bolded.
+    """
     return _RE_PUNISHMENT.sub(r"**\1**", text)
 
 
 def _mark_omitted_repealed(text: str) -> str:
+    """Wrap inline "Omitted by..." and "Repealed by..." phrases in ~~strikethrough~~.
+
+    @param text  Section text.
+    @return      Text with omission/repeal notices struck through.
+    """
     text = _RE_OMITTED_INLINE.sub(r"~~\1~~",  text)
     text = _RE_REPEALED_INLINE.sub(r"~~\1~~", text)
     return text
 
 
 def _linkify_section_refs(text: str, act_number: str, known_sections: set = frozenset()) -> str:
+    """Convert bare "section N" references to [[wikilinks]] pointing to block anchors.
+
+    Only linkifies references to sections that exist in known_sections (built
+    from the act's own SectionItems). Skips matches that are already inside a
+    wikilink by checking for an unclosed "[[" in the preceding 10 characters.
+
+    @param text            Section Markdown text.
+    @param act_number      Act number string for the wikilink target (e.g. "1710").
+    @param known_sections  Set of block ID strings from this act's sections.
+    @return                Text with eligible section references linkified.
+    """
     if not act_number:
         return text
 
@@ -1274,7 +1780,7 @@ def _linkify_section_refs(text: str, act_number: str, known_sections: set = froz
         anchor = _secnum_to_block_id(num)
         if anchor not in known_sections:
             return m.group(0)
-        return f"[[act-{act_number}#^sec-{anchor}|{prefix} {num}]]"
+        return f"[[act-{act_number}#^sec-{anchor}\\|{prefix} {num}]]"
 
     result = []
     last   = 0
@@ -1291,26 +1797,97 @@ def _linkify_section_refs(text: str, act_number: str, known_sections: set = froz
 
 
 def _table_to_markdown(table: Tag) -> str:
-    rows: list[list[str]] = []
+    """Convert an HTML table to a Markdown table, respecting rowspan and colspan.
+
+    Builds a 2D (row, col) → cell-text grid, expanding spans correctly so that
+    merged cells don't shift column positions. Cells covered by a span are left
+    empty. Cell text is extracted via _tag_to_md_text so that <a> links become
+    [[wikilinks]]. Pipe characters in cell text are escaped as \\|.
+
+    Outputs a blank header row when no <th> elements are present (pure data
+    table), to prevent the first data row from being misread as a header.
+
+    @param table  BeautifulSoup Tag for the <table> element.
+    @return       GFM Markdown table string, or "" if the table has no content.
+    """
+    grid: dict[tuple[int, int], str] = {}
+    occupied: set[tuple[int, int]] = set()
+
+    row_idx = 0
     for tr in table.find_all("tr"):
-        cells = [
-            " ".join(td.get_text(separator=" ", strip=True).split())
-            for td in tr.find_all(["td", "th"])
-        ]
-        if cells:
-            rows.append(cells)
+        col_idx = 0
+        for td in tr.find_all(["td", "th"], recursive=False):
+            while (row_idx, col_idx) in occupied:
+                col_idx += 1
+            try:
+                colspan = max(1, int(td.get("colspan", 1)))
+            except (ValueError, TypeError):
+                colspan = 1
+            try:
+                rowspan = max(1, int(td.get("rowspan", 1)))
+            except (ValueError, TypeError):
+                rowspan = 1
+            inner = "".join(_tag_to_md_text(c) for c in td.children)
+            text = re.sub(r"[\xa0​\s]+", " ", inner).strip().replace("|", "\\|")
+            grid[(row_idx, col_idx)] = text
+            for r in range(rowspan):
+                for c in range(colspan):
+                    if r == 0 and c == 0:
+                        continue
+                    pos = (row_idx + r, col_idx + c)
+                    occupied.add(pos)
+                    grid.setdefault(pos, "")
+            for r in range(1, rowspan):
+                occupied.add((row_idx + r, col_idx))
+            col_idx += colspan
+        row_idx += 1
+
+    if not grid:
+        return ""
+
+    max_row = max(r for r, _ in grid) + 1
+    max_col = max(c for _, c in grid) + 1
+
+    rows: list[list[str]] = []
+    for r in range(max_row):
+        row = [grid.get((r, c), "") for c in range(max_col)]
+        if any(c.strip() for c in row):
+            rows.append(row)
     if not rows:
         return ""
-    col_count = max(len(r) for r in rows)
-    rows = [r + [""] * (col_count - len(r)) for r in rows]
-    sep = ["---"] * col_count
-    return "\n".join(
-        ["| " + " | ".join(rows[0]) + " |", "| " + " | ".join(sep) + " |"]
-        + ["| " + " | ".join(r) + " |" for r in rows[1:]]
-    )
+
+    sep = ["---"] * max_col
+    has_real_header = bool(table.find("th"))
+
+    if has_real_header:
+        lines = [
+            "| " + " | ".join(rows[0]) + " |",
+            "| " + " | ".join(sep) + " |",
+        ]
+        for r in rows[1:]:
+            lines.append("| " + " | ".join(r) + " |")
+    else:
+        blank = [""] * max_col
+        lines = [
+            "| " + " | ".join(blank) + " |",
+            "| " + " | ".join(sep) + " |",
+        ]
+        for r in rows:
+            lines.append("| " + " | ".join(r) + " |")
+
+    return "\n".join(lines)
 
 
 def _is_boilerplate(raw: str) -> bool:
+    """Return True if more than 60% of non-empty lines match boilerplate patterns.
+
+    Boilerplate patterns include CONTENTS/SECTIONS headers, PREAMBLE/WHEREAS
+    headings, "An Act to" / "It is hereby" openers, and bare URLs. Used by
+    parse_detail to silently skip navigation-only rows.
+
+    @param raw  Raw text from a section body.
+    @return     True if this text should be discarded as boilerplate.
+    """
     lines = [l for l in raw.splitlines() if l.strip()]
     if not lines:
         return True
@@ -1322,6 +1899,15 @@ def _is_boilerplate(raw: str) -> bool:
 
 
 def _filter_stray_lines(text: str) -> str:
+    """Remove lines that are pure navigational noise or OCR artefacts.
+
+    Drops: lines starting with decorative symbols (♣ § ¶ • etc.), bare URLs,
+    markdown TOC links, and standalone CONTENTS/SECTIONS/PREAMBLE labels.
+    Preserves the stripped remainder of a decorated line if it contains content.
+
+    @param text  Section or preamble text.
+    @return      Text with stray lines removed.
+    """
     kept = []
     for line in text.splitlines():
         stripped = re.sub(r"^[♣♦§¶✦✧·•]+\s*", "", line)
@@ -1341,9 +1927,52 @@ def html_to_markdown(
     scraper: Optional[Scraper] = None,
     act_number: str = "",
     known_sections: set = frozenset(),
-    footnote_map: dict = {},
+    footnote_map: Optional[dict] = None,
 ) -> str:
-    """Full pipeline: HTML Tag -> clean Obsidian Markdown."""
+    """Convert a section's HTML Tag to clean Obsidian Markdown.
+
+    This is the core transformation pipeline. Steps in order:
+    1.  Tables → GFM Markdown (colspan/rowspan-aware).
+    2.  _tag_to_md_text — recursive HTML→text with wikilink conversion.
+    3.  Strip residual HTML tags left by non-standard markup.
+    4.  Footnote marker normalisation ([N] → [^N], [***] → [ * * * ]).
+    5.  Whitespace normalisation and left-strip of all lines.
+    6.  Drop standalone digit lines (page numbers).
+    7.  Strip wrapping brackets if the entire text is bracketed.
+    8.  Early-return with Warning callout if section is omitted/repealed.
+    9.  Strip leading section number.
+    10. Filter stray/boilerplate lines.
+    11. Strip single-letter editorial substitution brackets like [A].
+    12. Strip annotation brackets (preserving [[wikilinks]]).
+    13. Fix "].][" residue from wikilink followed by closing bracket.
+    14. Strip unmatched leading "[".
+    15. Join isolated list labels onto their following content line.
+    16. Split inline list items ("; (d) text" → newline).
+    17. Join connector-led fragment lines ("or", "and", "namely").
+    18. Join mid-sentence HTML line-break splits.
+    19. Mark "Omitted by" / "Repealed by" with strikethrough.
+    20. Format "Provided that" / ordinal items.
+    21. Bold punishment keywords.
+    22. Numbered and single Explanation/Exception callouts.
+    23. Margin callouts (Saving, Repeal, Commencement, Short title).
+    24. Definition callouts.
+    25. Nested list conversion.
+    26. Illustrations callout.
+    27. Nest secondary callouts inside Explanation blocks.
+    28. Cross-link section references to [[wikilinks]].
+    29. Resolve [^N][ * * * ] omission markers.
+    30. Relocate leading footnote refs to paragraph end.
+    31. Strip stray ][^N] → [^N].
+    32. Strip stray trailing ].
+    33. Collapse 3+ consecutive newlines.
+
+    @param details_div   BeautifulSoup Tag for the div.txt-details element.
+    @param scraper       Scraper instance (reserved for future use).
+    @param act_number    Act number string for intra-act section wikilinks.
+    @param known_sections  Set of block IDs from this act's own sections.
+    @param footnote_map  Dict of footnote_number → text for omission resolution.
+    @return              Clean Markdown string ready for Obsidian.
+    """
 
     for table in details_div.find_all("table"):
         table.replace_with(_table_to_markdown(table) + "\n")
@@ -1366,7 +1995,7 @@ def html_to_markdown(
     raw = _strip_leading_section_num(raw)
     raw = _filter_stray_lines(raw)
     raw = _RE_SUBST_LETTER.sub(r"\1", raw)
-    raw = _RE_ANNOTATION_BRACKETS.sub(_handle_annotation_bracket, raw)
+    raw = _strip_annotation_brackets(raw)
     raw = re.sub(r'(?<=\]\])\.?\](?!\])', lambda m: '.' if '.' in m.group(0) else '', raw)
     raw = _strip_unmatched_open_brackets(raw)
     raw = re.sub(r"^\.\s+(?=\()", "", raw.lstrip())
@@ -1390,8 +2019,10 @@ def html_to_markdown(
     if footnote_map:
         raw = _resolve_omissions(raw, footnote_map)
     raw = _relocate_leading_footnotes(raw)
-    # Remove stray trailing ] from unclosed editorial brackets,
-    # but not the ] that closes a [ * * * ] omission marker or a [^N] footnote ref.
+    # ][^N] → [^N]: orphaned bracket closer before footnote ref.
+    # (?<!\]) excludes ]], (?<!\* ) excludes [ * * * ], (?!\]) avoids ]][ corner.
+    raw = re.sub(r"(?<!\])(?<!\* )\](?!\])(\[\^\d+\])", r"\1", raw)
+    # Trailing stray ] from an unclosed editorial bracket; spares [ * * * ] and [^N].
     raw = re.sub(r"(?<!\])(?<!\* )(?<!\d)\]\s*$", "", raw.rstrip())
     raw = RE_MULTI_NEWLINE.sub("\n\n", raw)
 
@@ -1404,16 +2035,40 @@ def html_to_markdown(
 
 
 def _url_to_section_id(url: str) -> Optional[str]:
+    """Extract the numeric section ID from a bdlaws section permalink.
+
+    @param url  Absolute URL like ".../section-42.html".
+    @return     The ID string "42", or None if not a section URL.
+    """
     m = re.search(r"/section-(\d+)\.html", url)
     return m.group(1) if m else None
 
 
 def _detect_language(text: str) -> str:
+    """Detect whether text is predominantly Bengali or English.
+
+    Counts Unicode characters in the Bengali block (U+0980–U+09FF).
+    Threshold of 50 Bengali characters is intentionally loose to handle
+    acts with a Bengali title but English body.
+
+    @param text  Sample text (act title + first few section headings).
+    @return      "bn" or "en".
+    """
     bn_chars = sum(1 for c in text if "ঀ" <= c <= "৿")
     return "bn" if bn_chars > 50 else "en"
 
 
 def _heading_to_slug(text: str, language: str = "en") -> str:
+    """Convert a heading string to a URL-safe slug for YAML section entries.
+
+    For Bengali text, keeps only Bengali-block characters joined by hyphens.
+    For English/Latin text, lowercases, strips punctuation, and collapses
+    whitespace/underscores to hyphens. Truncated to 60 characters.
+
+    @param text      Heading or section number string.
+    @param language  "bn" for Bengali, "en" (default) for Latin.
+    @return          URL-safe slug string.
+    """
     if language == "bn":
         text = re.sub(r"[^ঀ-৿\s]", "", text)
         return re.sub(r"\s+", "-", text.strip())[:60]
@@ -1422,6 +2077,15 @@ def _heading_to_slug(text: str, language: str = "en") -> str:
 
 
 def _fix_bengali_ocr(text: str) -> str:
+    """Correct common OCR misreads in Bengali text from the bdlaws scan.
+
+    Known substitutions:
+    - Consonant + ৪ + Consonant → Consonant + ৃ (ৃ vowel sign, misread as ৪).
+    - Consonant + ৷ before consonant/space → Consonant + ি (ি vowel, misread as ৷).
+
+    @param text  Bengali section or preamble text.
+    @return      Text with OCR errors corrected.
+    """
     _BN_C = "কখগঘঙচছজঝঞটঠডঢণতথদধনপফবভমযরলশষসহড়ঢ়য়ৎ"
     text = re.sub(
         r"([" + _BN_C + r"])৪([" + _BN_C + r"])",
@@ -1435,7 +2099,7 @@ def _fix_bengali_ocr(text: str) -> str:
 
 
 _TAG_EXCLUSIONS: dict[str, list[str]] = {
-    "Banking & Finance": ["police", "criminal", "penal", "army", "navy", "air force", "intelligence"],
+    "Banking&Finance": ["police", "criminal", "penal", "army", "navy", "air force", "intelligence"],
     "Tax Law":           ["police", "criminal", "penal", "army", "navy", "intelligence"],
     "Labour Law":        ["police", "criminal", "penal", "intelligence"],
     "Property Law":      ["police", "criminal", "penal", "intelligence"],
@@ -1444,6 +2108,17 @@ _TAG_EXCLUSIONS: dict[str, list[str]] = {
 
 
 def _infer_tags(act_title: str, nodes: list) -> list[str]:
+    """Infer Obsidian tags from the act title and section headings.
+
+    Keyword-matches against _TAG_KEYWORDS, then removes tags whose exclusion
+    keywords appear in the act title (e.g. "LabourLaw" is excluded if the
+    title contains "police" to avoid tagging the Police Act as LabourLaw).
+    Always prepends ["Legal", "Bangladesh"]. Returns at most 8 tags.
+
+    @param act_title  Full act title string.
+    @param nodes      List of DocNode items (SectionItem headings are sampled).
+    @return           List of tag strings for the YAML frontmatter.
+    """
     tags = ["Legal", "Bangladesh"]
     combined = (
         act_title.lower() + " "
@@ -1467,14 +2142,35 @@ def _build_yaml_frontmatter(
     tags: list[str],
     act_number: str = "",
     language: str = "en",
-    section_entries: list = [],
+    section_entries: Optional[list] = None,
+    enacted_at: Optional[str] = None,
+    description: str = "",
 ) -> str:
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    """Build the YAML frontmatter block for an Obsidian Markdown file.
+
+    Field order: title, description, tags, source_url, act_id, year,
+    enacted_at, scraped_at, language, sections[].
+
+    @param act_title        Full act title (used for title and year extraction).
+    @param act_url          Canonical URL for source_url.
+    @param tags             List of tag strings from _infer_tags.
+    @param act_number       Numeric ID string for act_id.
+    @param language         "en" or "bn" for the language field.
+    @param section_entries  List of {id, slug, url} dicts for the sections block.
+    @param enacted_at       ISO date string (YYYY-MM-DD) or None.
+    @param description      One-line act description for the description field.
+    @return                 Complete YAML block including opening and closing "---".
+    """
+    scraped_at = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     tag_lines = "\n".join(f"  - {t}" for t in tags)
     safe_title = act_title.replace('"', '\\"')
-    year_m = re.search(r"\b(1[6-9]\d{2}|20\d{2})\b", act_title)
-    year_line = f"year: {year_m.group(1)}\n" if year_m else ""
+    safe_desc  = description.replace('"', '\\"')
+    ascii_title = act_title.translate(BENGALI_DIGIT_MAP)
+    year_m = re.search(r"\b(1[6-9]\d{2}|20\d{2})\b", ascii_title)
+    year_line   = f"year: {year_m.group(1)}\n" if year_m else ""
     act_id_line = f"act_id: {act_number}\n" if act_number else ""
+    enacted_line = f"enacted_at: {enacted_at}\n" if enacted_at else ""
+    desc_line    = f'description: "{safe_desc}"\n' if safe_desc else ""
     if section_entries:
         sec_block = "sections:\n" + "".join(
             f"  - id: {e['id']}\n    slug: {e['slug']}\n    url: {e['url']}\n"
@@ -1485,11 +2181,13 @@ def _build_yaml_frontmatter(
     return (
         f"---\n"
         f'title: "{safe_title}"\n'
+        f"{desc_line}"
         f"tags:\n{tag_lines}\n"
-        f"scraped_at: {now}\n"
         f"source_url: {act_url}\n"
         f"{act_id_line}"
         f"{year_line}"
+        f"{enacted_line}"
+        f"scraped_at: {scraped_at}\n"
         f"language: {language}\n"
         f"{sec_block}"
         f"---\n"
@@ -1503,8 +2201,34 @@ def build_markdown(
     act_url: str = "",
     scraper: Optional[Scraper] = None,
     title_footnote_num: Optional[int] = None,
+    enacted_at: Optional[str] = None,
+    description: str = "",
 ) -> str:
-    # Build footnote lookup for omission resolution
+    """Assemble the complete Markdown document from a list of DocNodes.
+
+    Builds YAML frontmatter (language detection, tag inference, section index),
+    writes the H1 title, then renders each DocNode at its appropriate heading
+    level:
+    - PreambleItem   → > [!Preamble] callout
+    - PartItem       → ## heading with URL link
+    - ChapterItem    → ### heading
+    - SubChapterItem → #### heading
+    - SectionItem    → ##### or ###### heading + html_to_markdown body
+    - FootnotesItem  → ## Footnotes section with [^N]: definitions
+
+    Inserted sections (containing a letter in the number, e.g. "4A") are
+    rendered at ###### to distinguish them from regular ##### sections.
+
+    @param nodes             Ordered list of DocNode instances from parse_detail.
+    @param act_number        Numeric act ID string.
+    @param act_title         Full act title for H1 and frontmatter.
+    @param act_url           Canonical URL for frontmatter source_url.
+    @param scraper           Passed through to html_to_markdown (reserved).
+    @param title_footnote_num  Footnote number to append to the H1, or None.
+    @param enacted_at        ISO date string for frontmatter, or None.
+    @param description       One-line description for frontmatter.
+    @return                  Complete Markdown document as a string.
+    """
     footnote_map: dict[int, str] = {}
     for node in nodes:
         if isinstance(node, FootnotesItem):
@@ -1512,13 +2236,11 @@ def build_markdown(
                 footnote_map[num] = text
             break
 
-    # Detect language from preamble + first few sections (must run before slug loop)
     sample = act_title + " ".join(
         (node.heading or "") for node in nodes[:10] if isinstance(node, SectionItem)
     )
     language = _detect_language(sample)
 
-    # Collect known section IDs and section frontmatter entries
     known_sections: set[str] = set()
     seen_section_ids: set[str] = set()
     section_entries: list[dict] = []
@@ -1540,6 +2262,7 @@ def build_markdown(
     lines.append(_build_yaml_frontmatter(
         act_title, act_url, tags,
         act_number=act_number, language=language, section_entries=section_entries,
+        enacted_at=enacted_at, description=description,
     ))
 
     if act_title:
@@ -1597,7 +2320,7 @@ def build_markdown(
             has_heading = bool(node.heading) or bool(node.number)
             if has_heading:
                 if node.number:
-                    term         = "সেকশন" if language == "bn" else ("Article" if "/Article-" in node.url else "Section")
+                    term         = "ধারা" if language == "bn" else ("Article" if "/Article-" in node.url else "Section")
                     heading_text = (
                         f"{term} {node.number}: {node.heading}"
                         if node.heading else f"{term} {node.number}"
@@ -1633,6 +2356,11 @@ def build_markdown(
 
 
 def _final_cleanup(md: str) -> str:
+    """Strip trailing whitespace from every line and collapse 3+ blank lines to 2.
+
+    @param md  Raw assembled Markdown string.
+    @return    Cleaned string ending with a single newline.
+    """
     cleaned = "\n".join(line.rstrip() for line in md.split("\n"))
     return RE_MULTI_NEWLINE.sub("\n\n", cleaned).strip() + "\n"
 
@@ -1645,19 +2373,44 @@ def _final_cleanup(md: str) -> str:
 def scrape_act(
     act_number: str, output: Path, delay: float,
     max_retries: int, cache_dir: Optional[Path], log: logging.Logger,
+    force_refresh: bool = False,
 ) -> None:
+    """Scrape one act and write it as an Obsidian Markdown file.
+
+    Fetches two pages per act in parallel (ToC and print page share one
+    Scraper; the rate lock serialises their delay intervals):
+    - act-N.html       (ToC page): section URL map, title, date, description.
+    - act-print-N.html (print page): full section bodies, preamble, footnotes.
+
+    Writes atomically via a .tmp file renamed on success.
+
+    The metadata resolution priority is:
+    - enacted_at  : publish-date <p> → preamble prose date → None
+    - description : meta description tag → preamble first line → ""
+
+    @param act_number    Numeric act ID string (e.g. "1710").
+    @param output        Destination Path for the .md file.
+    @param delay         Minimum seconds between HTTP requests.
+    @param max_retries   Maximum retry attempts per request.
+    @param cache_dir     Directory for HTML cache, or None.
+    @param log           Logger instance.
+    @param force_refresh Bypass cache and fetch live pages.
+    """
     toc_url    = f"{BASE_URL}/act-{act_number}.html"
     detail_url = f"{BASE_URL}/act-print-{act_number}.html"
-    scraper    = Scraper(delay=delay, max_retries=max_retries, cache_dir=cache_dir)
+    scraper    = Scraper(delay=delay, max_retries=max_retries, cache_dir=cache_dir,
+                        force_refresh=force_refresh)
 
-    log.info("Fetching ToC page: %s", toc_url)
-    toc_soup = scraper.fetch(toc_url)
-    toc_map  = parse_toc(toc_soup, BASE_URL)
-    log.info("Found %d section links in ToC", len(toc_map))
+    log.info("Fetching act-%s …", act_number)
+    with ThreadPoolExecutor(max_workers=2) as ex:
+        fut_toc    = ex.submit(scraper.fetch, toc_url)
+        fut_detail = ex.submit(scraper.fetch, detail_url)
+        toc_soup    = fut_toc.result()
+        detail_soup = fut_detail.result()
 
-    log.info("Fetching detail page: %s", detail_url)
-    detail_soup = scraper.fetch(detail_url)
-    log.info("Parsing document structure ...")
+    toc_map = parse_toc(toc_soup, BASE_URL)
+    log.info("act-%s: %d section links in ToC", act_number, len(toc_map))
+    log.info("act-%s: parsing document structure …", act_number)
 
     if _RICH:
         nodes: list[DocNode] = []
@@ -1686,12 +2439,21 @@ def scrape_act(
     act_title    = parse_act_title(detail_soup) or parse_act_title(toc_soup)
     title_fn_num = _extract_title_footnote_num(detail_soup) or _extract_title_footnote_num(toc_soup)
     act_url_str  = f"{BASE_URL}/act-{act_number}.html"
-    if act_title:     log.info("Act title: %s", act_title)
-    if title_fn_num:  log.info("Title footnote: [^%d]", title_fn_num)
+    enacted_at   = parse_act_date(toc_soup) or parse_act_date(detail_soup)
+    description  = parse_act_description(toc_soup) or parse_act_description(detail_soup)
+    if act_title:    log.info("Act title: %s", act_title)
+    if title_fn_num: log.info("Title footnote: [^%d]", title_fn_num)
+    if enacted_at:   log.info("Enacted at: %s", enacted_at)
 
     preamble = parse_preamble(detail_soup) or parse_preamble(toc_soup)
     if preamble:
         log.info("Preamble found (%d chars)", len(preamble))
+        if not enacted_at:
+            enacted_at = _parse_date_from_preamble_text(preamble)
+            if enacted_at:
+                log.info("Enacted at (from preamble): %s", enacted_at)
+        if not description:
+            description = next((l.strip() for l in preamble.splitlines() if l.strip()), "")[:200]
         nodes.insert(0, PreambleItem(text=preamble))
 
     footnotes = parse_footnotes(detail_soup)
@@ -1699,35 +2461,97 @@ def scrape_act(
         log.info("Found %d footnotes", len(footnotes.notes))
         nodes.append(footnotes)
 
-    log.info("Building Markdown ...")
+    seen_nums: set[str] = set()
+    for node in nodes:
+        if isinstance(node, SectionItem) and node.number:
+            bid = _secnum_to_block_id(node.number)
+            if bid in seen_nums:
+                log.warning("act-%s: duplicate section number %s", act_number, node.number)
+            seen_nums.add(bid)
+
+    log.info("act-%s: building Markdown …", act_number)
     md = build_markdown(
         nodes, act_number,
         act_title=act_title, act_url=act_url_str,
         scraper=scraper, title_footnote_num=title_fn_num,
+        enacted_at=enacted_at, description=description,
     )
-    output.write_text(md, encoding="utf-8")
-    log.info("Saved -> %s  (%d chars)", output, len(md))
+    tmp = output.with_suffix(".md.tmp")
+    tmp.write_text(md, encoding="utf-8")
+    tmp.replace(output)
+    log.info("act-%s: saved -> %s  (%d chars)", act_number, output, len(md))
 
 
 # ---------------------------------------------------------------------------
 # Batch scraping
 # ---------------------------------------------------------------------------
 
+_PROGRESS_LOCK = threading.Lock()
+
+
+def _load_progress(output_dir: Path) -> set[int]:
+    """Load the set of successfully completed act IDs from the checkpoint file.
+
+    @param output_dir  Directory containing .progress.json.
+    @return            Set of completed act ID integers.
+    """
+    p = output_dir / ".progress.json"
+    try:
+        return set(json.loads(p.read_text())["completed"])
+    except (OSError, KeyError, json.JSONDecodeError):
+        return set()
+
+
+def _save_progress(output_dir: Path, completed: set[int]) -> None:
+    """Atomically write the checkpoint file.
+
+    @param output_dir  Directory to write .progress.json into.
+    @param completed   Set of completed act ID integers.
+    """
+    p = output_dir / ".progress.json"
+    tmp = p.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps({"completed": sorted(completed)}))
+    tmp.replace(p)
+
 
 def _scrape_all_acts(
     output_dir: Path, delay: float, max_retries: int,
     cache_dir: Optional[Path], workers: int, skip_existing: bool,
+    act_from: int, act_to: int, force_refresh: bool,
     log: logging.Logger,
 ) -> None:
+    """Scrape a range of acts in parallel and write Markdown files.
+
+    Uses a ThreadPoolExecutor so multiple acts are fetched concurrently.
+    Progress is checkpointed to .progress.json after each success so
+    interrupted runs can resume without --skip-existing. After all workers
+    finish, generate_index() writes act-index.md in output_dir.parent.
+
+    @param output_dir    Directory to write act-N.md files.
+    @param delay         Per-worker minimum seconds between requests.
+    @param max_retries   Maximum retry attempts per request per worker.
+    @param cache_dir     Shared HTML cache directory, or None.
+    @param workers       Number of parallel worker threads.
+    @param skip_existing Skip acts whose output file already exists.
+    @param act_from      First act ID in the range (inclusive).
+    @param act_to        Last act ID in the range (inclusive).
+    @param force_refresh Bypass cache for all fetches.
+    @param log           Logger instance.
+    """
     output_dir.mkdir(parents=True, exist_ok=True)
-    acts = list(range(1, 1720))
+    acts = list(range(act_from, act_to + 1))
+    completed = _load_progress(output_dir)
 
     def run_one(act_num: int) -> tuple[int, str]:
         out_file = output_dir / f"act-{act_num}.md"
-        if skip_existing and out_file.exists():
+        if act_num in completed or (skip_existing and out_file.exists()):
             return act_num, "skip"
         try:
-            scrape_act(str(act_num), out_file, delay, max_retries, cache_dir, log)
+            scrape_act(str(act_num), out_file, delay, max_retries, cache_dir, log,
+                       force_refresh=force_refresh)
+            with _PROGRESS_LOCK:
+                completed.add(act_num)
+                _save_progress(output_dir, completed)
             return act_num, "ok"
         except Exception as e:
             return act_num, f"fail: {e}"
@@ -1770,6 +2594,71 @@ def _scrape_all_acts(
         print(f"Done: {ok} ok, {skip} skipped, {fail} failed")
 
     log.info("Batch complete: %d ok, %d skipped, %d failed", ok, skip, fail)
+    generate_index(output_dir, output_dir.parent / "act-index.md", log)
+
+
+# ---------------------------------------------------------------------------
+# Index generation
+# ---------------------------------------------------------------------------
+
+
+def generate_index(output_dir: Path, index_file: Path, log: logging.Logger) -> None:
+    """Read YAML frontmatter from all act-*.md files and write a Markdown index table.
+
+    Scans output_dir for files matching "act-*.md", parses each file's
+    YAML frontmatter for act_id, title, and description, then writes
+    act-index.md with a GFM table sorted numerically by act_id.
+
+    Act names are rendered as [[act-N\\|Title]] wikilinks. Pipe characters
+    in descriptions are escaped as \\| to protect table cell boundaries.
+
+    @param output_dir  Directory containing the act-*.md files.
+    @param index_file  Destination path for act-index.md.
+    @param log         Logger instance.
+    """
+    _RE_FM = re.compile(r"^---\n(.*?)\n---", re.DOTALL)
+
+    def _read_fm(text: str) -> dict[str, str]:
+        m = _RE_FM.match(text)
+        if not m:
+            return {}
+        result: dict[str, str] = {}
+        for line in m.group(1).splitlines():
+            kv = re.match(r"^(\w+):\s*(.*)", line)
+            if kv:
+                result[kv.group(1)] = kv.group(2).strip().strip('"')
+        return result
+
+    def _sort_key(p: Path) -> int:
+        m = re.search(r"\d+", p.stem)
+        return int(m.group()) if m else 0
+
+    rows: list[tuple[str, str, str]] = []
+    for md_file in sorted(output_dir.glob("act-*.md"), key=_sort_key):
+        try:
+            fm = _read_fm(md_file.read_text(encoding="utf-8"))
+        except OSError:
+            continue
+        act_id = fm.get("act_id", "").strip()
+        title  = fm.get("title", "").strip()
+        desc   = fm.get("description", "").strip().replace("|", "\\|")
+        if act_id and title:
+            rows.append((act_id, title, desc))
+
+    lines = [
+        "# Act Index",
+        "",
+        f"*{len(rows)} acts*",
+        "",
+        "| Act Number | Act Name | Description |",
+        "| --- | --- | --- |",
+    ]
+    for act_id, title, desc in rows:
+        lines.append(f"| {act_id} | [[act-{act_id}\\|{title}]] | {desc} |")
+    lines.append("")
+
+    index_file.write_text("\n".join(lines), encoding="utf-8")
+    log.info("Index written -> %s  (%d acts)", index_file, len(rows))
 
 
 # ---------------------------------------------------------------------------
@@ -1796,20 +2685,27 @@ def _scrape_all_acts(
               help="Parallel workers for --all mode.")
 @click.option("--skip-existing", is_flag=True, default=False,
               help="Skip acts that already have an output file (--all mode).")
+@click.option("--from", "act_from", default=1, show_default=True, type=int,
+              help="First act number to scrape in --all mode.")
+@click.option("--to", "act_to", default=1719, show_default=True, type=int,
+              help="Last act number to scrape in --all mode (inclusive).")
+@click.option("--force-refresh", is_flag=True, default=False,
+              help="Ignore disk cache and fetch live pages.")
 @click.option("--verbose", "-v", is_flag=True, default=False,
               help="Enable DEBUG-level logging.")
 def main(
     act_number: Optional[str], scrape_all: bool, output: Optional[str],
     output_dir: str, delay: float, retries: int, cache_dir: Optional[str],
-    workers: int, skip_existing: bool, verbose: bool,
+    workers: int, skip_existing: bool, act_from: int, act_to: int,
+    force_refresh: bool, verbose: bool,
 ) -> None:
     """Scrape Bangladesh law acts and save as Obsidian-compatible Markdown.
 
     Single act:  --act 1710
-    All acts:    --all  (parallel, uses cache by default)
+    All acts:    --all  (parallel; resumes from .progress.json; writes act-index.md)
+    Range:       --all --from 500 --to 600
     """
     log = setup_logging(verbose)
-
 
     if not act_number and not scrape_all:
         raise click.UsageError("Provide --act <number> or --all")
@@ -1823,6 +2719,7 @@ def main(
             _scrape_all_acts(
                 output_dir=Path(output_dir), delay=delay, max_retries=retries,
                 cache_dir=cache_path, workers=workers, skip_existing=skip_existing,
+                act_from=act_from, act_to=act_to, force_refresh=force_refresh,
                 log=log,
             )
         except KeyboardInterrupt:
@@ -1832,7 +2729,8 @@ def main(
         try:
             scrape_act(act_number=act_number, output=output_path,
                        delay=delay, max_retries=retries,
-                       cache_dir=cache_path, log=log)
+                       cache_dir=cache_path, log=log,
+                       force_refresh=force_refresh)
         except requests.HTTPError as e:
             log.error("HTTP error: %s", e); sys.exit(1)
         except requests.ConnectionError as e:
