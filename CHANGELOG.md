@@ -12,6 +12,8 @@
 - Acts named in dictionary footnotes ("the Penal Code, 1860") become `[[act-N|…]]` wikilinks, and a section named just before them links to that section's block anchor. This needs `bdlaw-dictionaries --acts-dir <folder of act-N.md>`; a name links only when exactly one act has it.
 - Dictionary entries whose terms differ only in case or punctuation are merged. Identical or wholly contained definitions collapse; definitions that really differ are all kept in one entry.
 
+- The dictionary pages carry a `## Footnotes` heading before their footnote definitions, as the acts do. The site drops it and prints its own footnote label.
+
 ### Fixed
 
 - Cross-references to several sections at once ("sections 64, 65, 66 and 445") only linked the first number. Every known section in the list is now linked; a quantity after "and" ("sections 3 and 4 years") is left alone.

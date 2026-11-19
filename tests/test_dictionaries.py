@@ -50,7 +50,7 @@ def test_write_markdown_sorts_and_lists_footnotes(tmp_path: Path):
     text = out.read_text()
     assert text.index("## A") < text.index("## B") < text.index("## Z")
     assert "| **alpha** | One.[^1] |" in text
-    assert text.rstrip().endswith("[^2]: Src B")
+    assert "\n## Footnotes\n\n[^1]: Src A\n[^2]: Src B" in text
     assert read_table_entries(out)[0].term == "**alpha**"
 
 
