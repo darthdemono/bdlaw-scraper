@@ -690,3 +690,18 @@ def test_ordinal_item_with_inline_sublist_nests():
     assert "\n   1. <!--n:(a)--> in the Government;" in out
     assert "\n   2. <!--n:(b)--> in a body;" in out
     assert "3. <!--n:Third--> C." in out
+
+
+def test_adverb_items_become_a_list_with_nested_sublist():
+    from bdlaw_scraper.scraper import _convert_word_ordinals
+
+    doc = (
+        "are,-\n\n**Firstly**: Death;\n\n**Secondly**: [^15]Life;\n\n"
+        "**Thirdly**: Imprisonment, namely:-\n\n1. <!--n:(1)--> Rigorous;\n2. <!--n:(2)--> Simple;\n\n"
+        "**Fourthly**: Forfeiture;"
+    )
+    out = _convert_word_ordinals(doc)
+    assert "1. <!--n:Firstly--> Death;" in out
+    assert "2. <!--n:Secondly--> [^15]Life;" in out
+    assert "   1. <!--n:(1)--> Rigorous;" in out and "   2. <!--n:(2)--> Simple;" in out
+    assert "4. <!--n:Fourthly--> Forfeiture;" in out
