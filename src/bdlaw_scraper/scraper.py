@@ -2127,66 +2127,90 @@ _ORDINAL_ITEM_WORDS = (
     "First Second Third Fourth Fifth Sixth Seventh Eighth Ninth Tenth Eleventh Twelfth "
     "Thirteenth Fourteenth Fifteenth Sixteenth Seventeenth Eighteenth Nineteenth Twentieth"
 ).split()
-_RE_WORD_ITEM = re.compile(r"^((?:\[\^\d+\])*)(" + "|".join(_ORDINAL_ITEM_WORDS) + r")(?:\s*\.\s*-*|\s*-+)\s*(\S.*)$")
-
-
+_ORDINAL_ADVERBS = "Firstly Secondly Thirdly Fourthly Fifthly Sixthly Seventhly Eighthly Ninthly Tenthly".split()
+_REFS = r"((?:\[\^\d+\])*)"
+# "First.- text" / "Second. text"
+_RE_WORD_ITEM = re.compile(r"^" + _REFS + "(" + "|".join(_ORDINAL_ITEM_WORDS) + r")(?:\s*\.\s*-*|\s*-+)\s*(\S.*)$")
+# "**Firstly**: text", as written by _convert_provided
+_RE_ADVERB_ITEM = re.compile(r"^" + _REFS + r"\*\*(" + "|".join(_ORDINAL_ADVERBS) + r")\*\*:\s*(\S.*)$")
 _RE_LONE_REFS = re.compile(r"^\s*(?:\[\^\d+\])+\s*$")
+_RE_LIST_LINE = re.compile(r"^(\s*)\d+\. <!--n:")
+
+
+def _ordinal_match(line: str):
+    """Return (refs, word, content) for an ordinal-word item line, else None."""
+    m = _RE_WORD_ITEM.match(line) or _RE_ADVERB_ITEM.match(line)
+    return m.groups() if m else None
 
 
 def _convert_word_ordinals(text: str) -> str:
-    """Turn "First.- ...", "Second. ..." paragraphs into a list that shows the word as its marker.
+    """Turn "First.- ...", "Second. ...", "**Firstly**: ..." paragraphs into a list that shows the word as its marker.
 
-    Needs at least two such lines in a row (blank lines between them allowed), so a sentence that
-    merely starts with "First." is left alone.
+    Needs at least two such lines in a row (blank lines, callouts and the item's own sub-list between
+    them are allowed), so a sentence that merely starts with "First." is left alone. List lines that
+    follow an item become its nested list, and an inline "(a)" in the item starts that list.
 
     @param text  Section text after list conversion.
     @return      Text with ordinal-word runs rewritten as list items.
     """
     lines = text.split("\n")
-    hits = [i for i, l in enumerate(lines) if _RE_WORD_ITEM.match(l)]
+    hits = [i for i, l in enumerate(lines) if _ordinal_match(l)]
     out = list(lines)
 
     def between(a: int, b: int) -> bool:
-        # text that ends the series: anything but blanks, callouts and lone footnote references
+        # text that ends the series: anything but blanks, callouts, lone footnote refs and list lines
         return any(
-            l.strip()
-            and not l.startswith(">")
-            and not _RE_LONE_REFS.match(l)
-            and not re.match(r"^\d+\. <!--n:\([b-z]", l)  # (b), (c) of an inline (a)
+            l.strip() and not l.startswith(">") and not _RE_LONE_REFS.match(l) and not _RE_LIST_LINE.match(l)
             for l in lines[a + 1 : b]
         )
 
+    def children(j: int) -> list[int]:
+        # list lines right after item j (blank lines allowed between them)
+        found: list[int] = []
+        k = j + 1
+        while k < len(lines):
+            if _RE_LIST_LINE.match(lines[k]):
+                found.append(k)
+            elif lines[k].strip():
+                break
+            k += 1
+        return found
+
+    def convert(run: list[int]) -> None:
+        for n, j in enumerate(run, 1):
+            refs, word, content = _ordinal_match(lines[j])
+            pad = " " * len(f"{n}. ")
+            kids = children(j)
+            sub = re.match(r"^(.*?[-:;,])\s*\(a\)\s+(.*)$", content) if kids else None
+            idx = 1
+            if sub:
+                # "Twelfth.- Every person- (a) ..." then (b), (c): the inline (a) opens the sub-list
+                out[j] = f"{n}. <!--n:{word}--> {sub.group(1)}{refs}\n\n{pad}1. <!--n:(a)--> {sub.group(2)}"
+                _record_numbering("(a)", 1, 2, "alpha")
+                idx = 2
+            else:
+                out[j] = f"{n}. <!--n:{word}--> {content}{refs}"
+            _record_numbering(word, n, 1, "ordinal_word")
+            for k in kids:
+                m = _RE_LIST_LINE.match(lines[k])
+                if m.group(1):  # already nested deeper
+                    out[k] = pad + lines[k]
+                else:
+                    out[k] = pad + f"{idx}. " + re.sub(r"^\d+\. ", "", lines[k])
+                    idx += 1
+            if j + 2 < len(lines) and _RE_LONE_REFS.match(lines[j + 2]) and not lines[j + 1].strip():
+                out[j] += lines[j + 2].strip()
+                out[j + 2] = ""
+            elif j + 1 < len(lines) and _RE_LONE_REFS.match(lines[j + 1]):
+                out[j] += lines[j + 1].strip()
+                out[j + 1] = ""
+
     run: list[int] = []
     for i in hits + [None]:
-        restart = i is not None and _RE_WORD_ITEM.match(lines[i]).group(2) == "First"  # a new series begins
+        restart = i is not None and _ordinal_match(lines[i])[1] in ("First", "Firstly")  # a new series begins
         if run and (i is None or restart or between(run[-1], i)):
             if len(run) >= 2:
-                for n, j in enumerate(run, 1):
-                    m = _RE_WORD_ITEM.match(lines[j])
-                    refs = m.group(1)
-                    content = m.group(3)
-                    sub = re.match(r"^(.*?[-:;,])\s*\(a\)\s+(.*)$", content)
-                    nxt = next((k for k in range(j + 1, len(lines)) if lines[k].strip()), None)
-                    if sub and nxt is not None and re.match(r"^\d+\. <!--n:\([b-z]", lines[nxt]):
-                        # "Twelfth.- Every person- (a) ..." followed by (b), (c): a sub-list under the item
-                        pad = " " * len(f"{n}. ")
-                        out[j] = f"{n}. <!--n:{m.group(2)}--> {sub.group(1)}{refs}\n\n{pad}1. <!--n:(a)--> {sub.group(2)}"
-                        _record_numbering("(a)", 1, 2, "alpha")
-                        k, idx = nxt, 2
-                        while k < len(lines) and (not lines[k].strip() or re.match(r"^\d+\. <!--n:\(", lines[k])):
-                            if lines[k].strip():
-                                out[k] = pad + f"{idx}. " + re.sub(r"^\d+\. ", "", lines[k])
-                                idx += 1
-                            k += 1
-                    else:
-                        out[j] = f"{n}. <!--n:{m.group(2)}--> {content}{refs}"
-                    _record_numbering(m.group(2), n, 1, "ordinal_word")
-                    if j + 2 < len(lines) and _RE_LONE_REFS.match(lines[j + 2]) and not lines[j + 1].strip():
-                        out[j] += lines[j + 2].strip()
-                        out[j + 2] = ""
-                    elif j + 1 < len(lines) and _RE_LONE_REFS.match(lines[j + 1]):
-                        out[j] += lines[j + 1].strip()
-                        out[j + 1] = ""
+                convert(run)
             run = []
         if i is not None:
             run.append(i)
