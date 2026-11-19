@@ -598,13 +598,13 @@ class TestJoinIsolatedLabels:
 def test_clean_heading_mid_footnote_number():
     from bdlaw_scraper.scraper import _clean_heading
 
-    assert _clean_heading("নিষিদ্ধ 18 [সত্তার] সদস্যপদ") == "নিষিদ্ধ [সত্তার] সদস্যপদ[^18]"
+    assert _clean_heading("নিষিদ্ধ 18 [সত্তার] সদস্যপদ") == "নিষিদ্ধ সত্তার সদস্যপদ[^18]"
 
 
 def test_clean_heading_leading_footnote_number_then_text():
     from bdlaw_scraper.scraper import _clean_heading
 
-    assert _clean_heading("2 [মহাপরিচালক], ইত্যাদি") == "[মহাপরিচালক], ইত্যাদি[^2]"
+    assert _clean_heading("2 [মহাপরিচালক], ইত্যাদি") == "মহাপরিচালক, ইত্যাদি[^2]"
 
 
 def test_adjacent_footnote_refs_keep_their_brackets():
@@ -644,3 +644,35 @@ def test_bracket_followed_by_paren_in_heading_is_escaped():
     from bdlaw_scraper.scraper import _RE_LINK_LOOKALIKE
 
     assert _RE_LINK_LOOKALIKE.sub(r"\\[\1\\](", "(b) [Omitted](c) x") == "(b) \\[Omitted\\](c) x"
+
+
+def test_callout_list_restarts_at_one():
+    from bdlaw_scraper.scraper import _restart_callout_lists
+
+    doc = "> > [!Illustrations]\n> > 5. <!--n:(a)--> A.\n> > 6. <!--n:(b)--> B.\n\n1. <!--n:(1)--> x"
+    assert _restart_callout_lists(doc) == "> > [!Illustrations]\n> > 1. <!--n:(a)--> A.\n> > 2. <!--n:(b)--> B.\n\n1. <!--n:(1)--> x"
+
+
+def test_ordinal_words_become_a_list():
+    from bdlaw_scraper.scraper import _convert_word_ordinals
+
+    doc = "namely:-\n\nFirst.-Omitted;\n\nSecond. Every officer;\n\nThird.- Every Judge;\n\nFirst. a lone sentence."
+    out = _convert_word_ordinals(doc).split("\n")
+    assert out[2] == "1. <!--n:First--> Omitted;"
+    assert out[4] == "2. <!--n:Second--> Every officer;"
+    assert out[6] == "3. <!--n:Third--> Every Judge;"
+    assert out[8] == "First. a lone sentence."
+
+
+def test_heading_drops_inner_amendment_brackets():
+    from bdlaw_scraper.scraper import _clean_heading
+
+    assert _clean_heading("19 [Commutation of sentence of [ imprisonment ] for life]") == "Commutation of sentence of imprisonment for life[^19]"
+
+
+def test_preamble_drops_lone_dash_line():
+    from bs4 import BeautifulSoup
+    from bdlaw_scraper.scraper import parse_preamble
+
+    h = "<div class='preamble-content'><p>Whereas it is expedient;</p><p>-</p></div>"
+    assert parse_preamble(BeautifulSoup(h, "html.parser")) == "Whereas it is expedient;"
