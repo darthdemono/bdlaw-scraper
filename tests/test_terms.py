@@ -1,0 +1,83 @@
+from pathlib import Path
+
+from bdlaw_scraper.terms import build, parse_act, word_diff, wordings
+
+ACT = """---
+title: "The Port Ordinance, {year}"
+year: {year}
+enacted_at: {year}-02-17
+language: en
+---
+##### [Section 2: Definitions](http://x/s.html) ^sec-2
+
+In this Ordinance, unless the context otherwise requires,-
+
+1. <!--n:(a)--> “lease” has the same meaning as in the [[act-48\\|Transfer of Property Act, 1882]];
+2. <!--n:(b)--> “port” means {port};
+3. <!--n:(c)--> “prescribed” means prescribed by rules made under this Ordinance; and
+4. <!--n:(d)--> “occupant” means a person who is in occupation, and includes-
+   1. <!--n:(i)--> an inducted person; and
+   2. <!--n:(ii)--> a remaining person.
+
+##### [Section 3: Powers](http://x/s3.html) ^sec-3
+
+1. <!--n:(a)--> “not a definition” means nothing here.
+"""
+
+
+def act(year, port):
+    return ACT.format(year=year, port=port)
+
+
+def test_parse_act_reads_list_definitions_and_nested_items():
+    defs = {d.terms[0]: d for d in parse_act(act(1962, "a harbour"), "act-1")}
+    assert set(defs) == {"lease", "port", "prescribed", "occupant"}  # section 3 is not a definitions section
+    assert defs["port"].text == "means a harbour" and defs["port"].section_label == "section 2"
+    assert defs["lease"].by_ref and not defs["port"].by_ref
+    assert [s[1:] for s in defs["occupant"].subitems] == [("(i)", "an inducted person"), ("(ii)", "a remaining person.")]
+
+
+def test_callout_definition_with_following_list():
+    text = '---\ntitle: "Evidence"\nyear: 1872\n---\n##### [Section 3: Interpretation](u) ^sec-3\n\n> [!Definition]\n> **Fact** means and includes-\n\n1. <!--n:(1)--> anything perceived;\n2. <!--n:(2)--> any mental condition.\n'
+    (d,) = parse_act(text, "act-24")
+    assert d.terms == ["Fact"] and [s[2] for s in d.subitems] == ["anything perceived", "any mental condition."]
+
+
+def test_bengali_definition():
+    text = '---\ntitle: "আইন, ২০০৮"\nyear: 2008\n---\n##### [ধারা ২: সংজ্ঞা](u) ^sec-2\n\n1. <!--n:(ক)--> "আদালত" অর্থ স্পেশাল জজ এর আদালত;\n'
+    (d,) = parse_act(text, "act-9")
+    assert d.lang == "bn" and d.terms == ["আদালত"] and d.section_label == "ধারা ২"
+
+
+def test_same_wording_is_one_group_and_newest_is_current(tmp_path: Path):
+    for n, (year, port) in enumerate([(1962, "a harbour"), (1985, "a harbour"), (2001, "a harbour or a dock")], 1):
+        (tmp_path / f"act-{n}.md").write_text(act(year, port))
+    notes, n_terms, n_defs = build(tmp_path)
+    assert n_defs == 12 and n_terms == 4
+    page = notes["Defined Terms P"]
+    assert "Current wording (2001)" in page
+    assert "Earlier wordings" in page and "Same wording: " in page  # 1962 and 1985 share one wording
+    assert "**or a dock**" in page  # what the newer wording added
+    assert "Same wording in 2 other acts" in page  # "prescribed" never changed
+    assert "Defined by reference" in notes["Defined Terms L"]
+    assert "Defined Terms" in notes
+
+
+def test_word_diff():
+    assert word_diff("means a harbour", "means a harbour or dock") == "means a harbour **or dock**"
+    assert word_diff("one two three four five six", "red blue green") == "rewritten"
+
+
+def test_wordings_ignore_this_act_variants():
+    a = parse_act(act(1962, "x").replace("Ordinance", "Ordinance"), "act-1")
+    b = parse_act(act(1970, "x").replace("this Ordinance", "this Act"), "act-2")
+    both = [d for d in a + b if d.terms[0] == "prescribed"]
+    assert len(wordings(both)) == 1
+
+
+def test_definitions_run_together_on_one_line_are_split():
+    text = '---\ntitle: "T"\nyear: 1950\n---\n##### [Section 2: Definitions](u) ^sec-2\n\n1. <!--n:(xx)--> “market” includes any place; [^8](xxa) “militia” means a force; [^9][[^10][omitted]]\n'
+    defs = parse_act(text, "act-1")
+    assert [d.terms[0] for d in defs] == ["market", "militia"]
+    assert defs[0].text == "includes any place" and defs[1].text.startswith("means a force")
+    assert "omitted" not in defs[1].text
