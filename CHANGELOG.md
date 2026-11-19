@@ -9,6 +9,12 @@
 
 ### Fixed
 
+- Cross-references to several sections at once ("sections 64, 65, 66 and 445") only linked the first number. Every known section in the list is now linked; a quantity after "and" ("sections 3 and 4 years") is left alone.
+- Footnote references were lost in many places, leaving about 600 notes without a reference: Bengali-digit brackets were read as references, a footnote number in front of a bracketed word in a heading ("Prohibited 18 [entity]") or glued to a chapter name was dropped, the preamble lost its references, and a closer before an adjacent reference ("335[1995]") ate the first reference's bracket. Notes now keep their references. A bracketed year with no matching note stays plain text.
+- Editorial brackets that span several lines or sit open in front of a wikilink ("[[[act-354|..]]") are removed, and an amendment bracket around a sub-chapter heading no longer becomes a broken wikilink.
+- Footnote numbers are de-duplicated, nested "[28[29]" references split into two, block ids are unique, and a "[Omitted](c)" inside a heading is escaped so it is not read as a link.
+- Section lists in other forms: Bengali section numbers, a reference to another act is left unlinked, double-letter and suffix list markers ("(aa)", "(2A)"), and table rows are no longer split by list conversion.
+- Frontmatter values are quoted as JSON and links to acts that do not exist point to the official site.
 - A list that starts with a deep marker such as roman (i) straight after a paragraph was indented 6 spaces and shown as a code block (138 items in 92 acts). Items now start at the top level and nest only one level at a time.
 - Acts with an Explanation callout followed by an Illustration or Exception failed with `NameError: _RE_SECONDARY_HDR` (121 acts).
 
