@@ -657,7 +657,10 @@ def write_markdown(
         lines += [f"## {k}", "", "| Term | Definition |", "| --- | --- |"]
         lines += [f"| **{t.replace('|', chr(92) + '|')}** | {d.replace('|', chr(92) + '|')} |" for t, d in sections[k]]
         lines.append("")
-    lines += [f"[^{i}]: {acts.link(n) if acts else n}" for i, n in enumerate(notes, 1)]
+    if notes:
+        # Same heading the acts carry: it keeps the markdown readable in Obsidian, the site swaps it for its own label.
+        lines += ["## Footnotes", ""]
+        lines += [f"[^{i}]: {acts.link(n) if acts else n}" for i, n in enumerate(notes, 1)]
 
     tmp = output_path.with_suffix(".md.tmp")
     tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
