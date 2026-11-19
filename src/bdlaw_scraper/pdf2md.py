@@ -31,23 +31,27 @@ _BN_CONS = "কখগঘঙচছজঝঞটঠডঢণতথদধনপফ�
 # Markup strippers
 # ---------------------------------------------------------------------------
 
+
 def strip_markup(s: str) -> str:
     """Remove <sup>, bold **, leading [, trailing ], trailing '."""
     s = re.sub(r"<sup>[^<]*</sup>", "", s)
     s = re.sub(r"\*{1,2}([^*]+)\*{1,2}", r"\1", s)
-    s = re.sub(r"^\[+", "", s)           # leading [[ or [
-    s = re.sub(r"[\]'\"]\s*$", "", s)    # trailing ] ' "
+    s = re.sub(r"^\[+", "", s)  # leading [[ or [
+    s = re.sub(r"[\]'\"]\s*$", "", s)  # trailing ] ' "
     return unicodedata.normalize("NFC", s).strip()
+
 
 def strip_bullet(line: str) -> Optional[str]:
     """Remove leading '- ' or '* ' at any indent. Returns content or None."""
     m = re.match(r"^(\s*)[-*]\s+(.*)", line, re.DOTALL)
     return m.group(2) if m else None
 
+
 def bullet_indent(line: str) -> int:
     """Return indent level (spaces) of a bullet line."""
     m = re.match(r"^(\s*)[-*]", line)
     return len(m.group(1)) if m else 0
+
 
 # ---------------------------------------------------------------------------
 # Section line detector
@@ -60,12 +64,13 @@ def bullet_indent(line: str) -> int:
 #   "4. Publication of authentic Bangla translation.-The..."
 #   "1A. Short title.-"
 RE_SEC_CONTENT = re.compile(
-    r"^(\d+[A-Za-z]?)\.\s+"      # group 1: section number
-    r"(.+?)"                       # group 2: heading (non-greedy)
-    r"\.-\s*"                      # separator ".-"
-    r"(.*)$",                      # group 3: optional inline body
+    r"^(\d+[A-Za-z]?)\.\s+"  # group 1: section number
+    r"(.+?)"  # group 2: heading (non-greedy)
+    r"\.-\s*"  # separator ".-"
+    r"(.*)$",  # group 3: optional inline body
     re.DOTALL,
 )
+
 
 def parse_section_bullet(raw_line: str) -> Optional[tuple[str, str, str]]:
     """
@@ -87,14 +92,18 @@ def parse_section_bullet(raw_line: str) -> Optional[tuple[str, str, str]]:
     body = m.group(3).strip()
     return num, heading, body
 
+
 # ---------------------------------------------------------------------------
 # Clause classifier
 # ---------------------------------------------------------------------------
 
 # Real roman numerals: only multi-char, OR single 'i'/'v'/'x'
-_ROMAN_MULTI = re.compile(r"^(ii|iii|iv|vi|vii|viii|ix|xi|xii|xiii|xiv|xv|xx)$", re.IGNORECASE)
+_ROMAN_MULTI = re.compile(
+    r"^(ii|iii|iv|vi|vii|viii|ix|xi|xii|xiii|xiv|xv|xx)$", re.IGNORECASE
+)
 _ROMAN_SINGLE = re.compile(r"^[ivx]$", re.IGNORECASE)
 _BN_LABEL = re.compile(r"^[" + _BN_CONS + r"০-৯]+$")
+
 
 def classify_label(label: str) -> str:
     """Return 'decimal'|'roman'|'alpha'|'bn'."""
@@ -106,16 +115,22 @@ def classify_label(label: str) -> str:
         return "roman"
     return "alpha"
 
-RE_CLAUSE_CONTENT = re.compile(r"^\(([A-Za-z\d" + _BN_CONS + r"০-৯]+)\)\s+(.*)", re.DOTALL)
+
+RE_CLAUSE_CONTENT = re.compile(
+    r"^\(([A-Za-z\d" + _BN_CONS + r"০-৯]+)\)\s+(.*)", re.DOTALL
+)
+
 
 def parse_clause(content: str) -> Optional[tuple[str, str]]:
     """Try to parse '(a) text' → (label, text). Returns None if not a clause."""
     m = RE_CLAUSE_CONTENT.match(content.strip())
     return (m.group(1), m.group(2).strip()) if m else None
 
+
 # ---------------------------------------------------------------------------
 # List renderer
 # ---------------------------------------------------------------------------
+
 
 def render_clauses(items: list[tuple[str, str]], kind: str) -> str:
     if kind == "decimal":
@@ -123,6 +138,7 @@ def render_clauses(items: list[tuple[str, str]], kind: str) -> str:
     style = "lower-roman" if kind == "roman" else "lower-alpha"
     inner = "".join(f"<li>{text}</li>" for _, text in items)
     return f'<ol style="list-style-type: {style};">{inner}</ol>'
+
 
 # ---------------------------------------------------------------------------
 # Footnote detection
@@ -137,6 +153,7 @@ RE_FOOTNOTE_LINE = re.compile(
 # Core reformatter
 # ---------------------------------------------------------------------------
 
+
 def reformat(raw_md: str, title: str = "", source: str = "") -> str:
     lines = raw_md.splitlines()
     out: list[str] = []
@@ -146,11 +163,11 @@ def reformat(raw_md: str, title: str = "", source: str = "") -> str:
         out.append(f"# {title}{src}\n")
 
     # ── State
-    current_chapter: Optional[tuple[str, str]] = None   # (num, title)
+    current_chapter: Optional[tuple[str, str]] = None  # (num, title)
     current_section_num: str = ""
     current_section_heading: str = ""
-    section_body: list[str] = []    # rendered body items (strings)
-    pending: list[tuple[str, str]] = []   # current clause group
+    section_body: list[str] = []  # rendered body items (strings)
+    pending: list[tuple[str, str]] = []  # current clause group
     pending_kind: str = ""
     footnotes: list[str] = []
 
@@ -217,7 +234,9 @@ def reformat(raw_md: str, title: str = "", source: str = "") -> str:
         # ── Markdown heading lines (##, ###)
         if stripped.startswith("#"):
             # Chapter?
-            m = re.match(r"^#{1,3}\s+\d*\[?Chapter[-\s]([IVXivx\dA-Za-z]+)\]?", stripped, re.I)
+            m = re.match(
+                r"^#{1,3}\s+\d*\[?Chapter[-\s]([IVXivx\dA-Za-z]+)\]?", stripped, re.I
+            )
             if m:
                 flush_chapter()
                 num = m.group(1).upper()
@@ -227,7 +246,9 @@ def reformat(raw_md: str, title: str = "", source: str = "") -> str:
                 while j < n and not lines[j].strip():
                     j += 1
                 if j < n:
-                    m2 = re.match(r"^#{1,3}\s+([A-Z][A-Z\s\-&,]{3,})$", lines[j].rstrip())
+                    m2 = re.match(
+                        r"^#{1,3}\s+([A-Z][A-Z\s\-&,]{3,})$", lines[j].rstrip()
+                    )
                     if m2:
                         title_ch = m2.group(1).strip().title()
                         i = j
@@ -236,7 +257,9 @@ def reformat(raw_md: str, title: str = "", source: str = "") -> str:
                 continue
 
             # Part?
-            m = re.match(r"^#{1,3}\s+Part\s+([IVXivx\d]+)[.\s]*[-–]?\s*(.*)?$", stripped, re.I)
+            m = re.match(
+                r"^#{1,3}\s+Part\s+([IVXivx\d]+)[.\s]*[-–]?\s*(.*)?$", stripped, re.I
+            )
             if m:
                 flush_chapter()
                 label = f"Part {m.group(1).upper()}"
@@ -274,7 +297,9 @@ def reformat(raw_md: str, title: str = "", source: str = "") -> str:
                 if sec:
                     flush_section()
                     # Emit chapter heading now if pending
-                    if current_chapter and not any("Chapter" in l for l in out[-5:] if l.strip()):
+                    if current_chapter and not any(
+                        "Chapter" in l for l in out[-5:] if l.strip()
+                    ):
                         flush_chapter_heading()  # see below
                     num, heading, body_start = sec
                     current_section_num = num
@@ -355,6 +380,7 @@ def reformat(raw_md: str, title: str = "", source: str = "") -> str:
 # Simpler: just sort out by doing a two-pass approach.
 # Actually let's just reorder output in post-processing.
 
+
 def reformat_final(raw_md: str, title: str = "", source: str = "") -> str:
     """
     Two-pass: first collect all nodes, then render in correct order.
@@ -388,7 +414,13 @@ def reformat_final(raw_md: str, title: str = "", source: str = "") -> str:
         nonlocal current_chapter
         flush_section()
         if current_chapter:
-            nodes.append({"type": "chapter", "num": current_chapter[0], "title": current_chapter[1]})
+            nodes.append(
+                {
+                    "type": "chapter",
+                    "num": current_chapter[0],
+                    "title": current_chapter[1],
+                }
+            )
         current_chapter = None
 
     def new_section(num: str, heading: str):
@@ -397,11 +429,22 @@ def reformat_final(raw_md: str, title: str = "", source: str = "") -> str:
         nonlocal current_chapter
         if current_chapter:
             flush_section()
-            nodes.append({"type": "chapter", "num": current_chapter[0], "title": current_chapter[1]})
+            nodes.append(
+                {
+                    "type": "chapter",
+                    "num": current_chapter[0],
+                    "title": current_chapter[1],
+                }
+            )
             current_chapter = None
         else:
             flush_section()
-        current_section = {"type": "section", "num": num, "heading": heading, "body": []}
+        current_section = {
+            "type": "section",
+            "num": num,
+            "heading": heading,
+            "body": [],
+        }
 
     def add_clause_node(label: str, content: str):
         nonlocal pending, pending_kind
@@ -430,7 +473,9 @@ def reformat_final(raw_md: str, title: str = "", source: str = "") -> str:
         # Heading lines
         if stripped.startswith("#"):
             # Chapter
-            m = re.match(r"^#{1,3}\s+\d*\[?Chapter[-\s]([IVXivx\dA-Za-z]+)\]?", stripped, re.I)
+            m = re.match(
+                r"^#{1,3}\s+\d*\[?Chapter[-\s]([IVXivx\dA-Za-z]+)\]?", stripped, re.I
+            )
             if m:
                 flush_chapter()
                 num = m.group(1).upper()
@@ -439,7 +484,9 @@ def reformat_final(raw_md: str, title: str = "", source: str = "") -> str:
                 while j < n and not lines[j].strip():
                     j += 1
                 if j < n:
-                    m2 = re.match(r"^#{1,3}\s+([A-Z][A-Z\s\-&,]{3,})$", lines[j].rstrip())
+                    m2 = re.match(
+                        r"^#{1,3}\s+([A-Z][A-Z\s\-&,]{3,})$", lines[j].rstrip()
+                    )
                     if m2:
                         title_ch = m2.group(1).strip().title()
                         i = j
@@ -448,11 +495,18 @@ def reformat_final(raw_md: str, title: str = "", source: str = "") -> str:
                 continue
 
             # Part
-            m = re.match(r"^#{1,3}\s+Part\s+([IVXivx\d]+)[.\s]*[-–]?\s*(.*)?$", stripped, re.I)
+            m = re.match(
+                r"^#{1,3}\s+Part\s+([IVXivx\d]+)[.\s]*[-–]?\s*(.*)?$", stripped, re.I
+            )
             if m:
                 flush_chapter()
-                nodes.append({"type": "part", "num": m.group(1).upper(),
-                               "title": (m.group(2) or "").strip(" -–")})
+                nodes.append(
+                    {
+                        "type": "part",
+                        "num": m.group(1).upper(),
+                        "title": (m.group(2) or "").strip(" -–"),
+                    }
+                )
                 i += 1
                 continue
 
@@ -556,11 +610,13 @@ def reformat_final(raw_md: str, title: str = "", source: str = "") -> str:
 # marker_single runner
 # ---------------------------------------------------------------------------
 
+
 def run_marker(pdf_path: Path) -> Path:
     click.echo(f"Running marker_single on {pdf_path.name} …")
     result = subprocess.run(
         ["marker_single", str(pdf_path)],
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
     )
     if result.returncode != 0:
         raise RuntimeError(f"marker_single failed:\n{result.stderr}")
@@ -574,6 +630,7 @@ def run_marker(pdf_path: Path) -> Path:
                 return mds[0]
 
     import glob as _glob
+
     stem = pdf_path.stem
     for pattern in [
         f"conversion_results/{stem}/{stem}.md",
@@ -589,21 +646,28 @@ def run_marker(pdf_path: Path) -> Path:
         "Run marker_single manually then use --no-run <file.md>"
     )
 
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
+
 @click.command()
 @click.argument("input_path", type=click.Path(exists=True, dir_okay=False))
-@click.option("-o", "--output", default=None,
-              help="Output .md path. Defaults to <input>.md")
-@click.option("--title", "-t", default="",
-              help="Document title for the H1 heading.")
-@click.option("--source", "-s", default="",
-              help="Source note appended after title.")
-@click.option("--no-run", is_flag=True, default=False,
-              help="INPUT_PATH is an already-converted marker .md file; skip marker_single.")
-def main(input_path: str, output: Optional[str], title: str, source: str, no_run: bool) -> None:
+@click.option(
+    "-o", "--output", default=None, help="Output .md path. Defaults to <input>.md"
+)
+@click.option("--title", "-t", default="", help="Document title for the H1 heading.")
+@click.option("--source", "-s", default="", help="Source note appended after title.")
+@click.option(
+    "--no-run",
+    is_flag=True,
+    default=False,
+    help="INPUT_PATH is an already-converted marker .md file; skip marker_single.",
+)
+def main(
+    input_path: str, output: Optional[str], title: str, source: str, no_run: bool
+) -> None:
     """Convert a Bangladesh legal PDF via marker_single → bdlaw-style Markdown."""
     inp = Path(input_path)
 

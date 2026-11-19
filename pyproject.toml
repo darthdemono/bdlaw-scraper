@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bdlaw-scraper"
+version = "0.2.0"
+description = "Scrape the acts of Bangladesh from bdlaws.minlaw.gov.bd into Obsidian and LLM friendly Markdown, keeping footnotes and the original clause numbering."
+readme = "README.md"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Jubair Hasan" }]
+requires-python = ">=3.10"
+keywords = ["bangladesh", "law", "scraper", "markdown", "obsidian", "legal"]
+dependencies = [
+  "beautifulsoup4>=4.12",
+  "click>=8.1",
+  "lxml>=5.0",
+  "requests>=2.31",
+  "rich>=13.0",
+  "tenacity>=8.2",
+]
+
+[project.optional-dependencies]
+translate = ["ctranslate2>=4.0", "transformers>=4.40", "huggingface_hub>=0.23", "sentencepiece>=0.2"]
+dev = ["pytest>=8.0"]
+
+[project.urls]
+Homepage = "https://github.com/darthdemono/bdlaw-scraper"
+Issues = "https://github.com/darthdemono/bdlaw-scraper/issues"
+
+[project.scripts]
+bdlaw-scraper = "bdlaw_scraper.scraper:main"
+bdlaw-dictionaries = "bdlaw_scraper.dictionaries:main"
+bdlaw-translate = "bdlaw_scraper.translate:main"
+bdlaw-pdf2md = "bdlaw_scraper.pdf2md:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

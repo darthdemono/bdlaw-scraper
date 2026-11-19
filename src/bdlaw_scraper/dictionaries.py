@@ -1,28 +1,42 @@
 #!/usr/bin/env python3
 """
-CLCBD Law Portal Scraper
-========================
-Scrapes three reference collections from clcbd.org and writes clean Markdown tables.
+CLCBD Legal Reference Dictionary Scraper
+=========================================
+Scrapes the three legal reference *dictionary* collections from clcbd.org and
+writes Obsidian-compatible Markdown with YAML frontmatter and per-term headings.
 
-Collections:
-  1. Law Dictionary  → https://www.clcbd.org/lawdictionary/{id}.html
-  2. Latin Terms     → https://www.clcbd.org/latinterms/{id}.html   (IDs 1–119)
-  3. Glossary        → https://www.clcbd.org/glossary/{id}.html
+Scope
+-----
+This scraper covers only the reference/dictionary section of clcbd.org — not
+full act text, case law, or judgments. The three collections are:
+  1. Law Dictionary  — plain-language definitions of Bangladeshi legal terms
+  2. Latin Terms     — Latin maxims used in Bangladeshi courts (IDs 1–119, fixed)
+  3. Glossary        — additional legal vocabulary
 
-Output files (one per collection):
-  lawdictionary.md, latinterms.md, glossary.md
+Output (one .md file per collection)
+--------------------------------------
+Each file has a YAML frontmatter block followed by one `##` heading per term
+and its definition as a plain paragraph. This layout is intentionally LLM-friendly:
+  - Terms are retrievable by heading
+  - Definitions sit in plain paragraphs (no table cell escaping)
+  - `---` separators mark entry boundaries for semantic chunking
 
-Stopping heuristics for open-ended collections (lawdictionary, glossary):
-  - HTTP 404 / redirect away from detail page
-  - Empty / boilerplate page (no detail-view table found)
-  - Duplicate title seen (server looped back to start)
-  - Hard cap: if --max-id not set, stops after seeing 15 consecutive missing pages
+Stopping heuristics for open-ended collections (lawdictionary, glossary)
+--------------------------------------------------------------------------
+  - HTTP 404 / redirect away from the detail page
+  - Page with no detail-view table (index or error page)
+  - Duplicate term already collected (server looped back)
+  - Stops after DEAD_STREAK_LIMIT consecutive misses (default 20)
 
-Usage:
-  python clcbd_scraper.py                         # scrape all three
+Usage
+-----
+  python clcbd_scraper.py                              # scrape all three
   python clcbd_scraper.py --collection latinterms
   python clcbd_scraper.py --collection lawdictionary --max-id 1200
+  python clcbd_scraper.py --from-id 50                # resume from ID 50
+  python clcbd_scraper.py --skip-existing              # skip already-written files
   python clcbd_scraper.py --delay 0.5 --retries 5 --cache-dir .cache
+  python clcbd_scraper.py --force-refresh              # bypass cache
   python clcbd_scraper.py --verbose
 """
 
@@ -47,6 +61,7 @@ from tenacity import (
     stop_after_attempt,
     wait_exponential,
 )
+from .http import BaseScraper
 
 # ---------------------------------------------------------------------------
 # Rich (optional) — falls back to plain logging gracefully
@@ -54,7 +69,13 @@ from tenacity import (
 try:
     from rich.console import Console
     from rich.logging import RichHandler
-    from rich.progress import BarColumn, MofNCompleteColumn, Progress, SpinnerColumn, TextColumn
+    from rich.progress import (
+        BarColumn,
+        MofNCompleteColumn,
+        Progress,
+        SpinnerColumn,
+        TextColumn,
+    )
 
     _RICH = True
     console = Console(stderr=True)
@@ -70,7 +91,7 @@ BASE_URL = "http://www.clcbd.org"
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (compatible; CLCBDScraper/1.0; "
-        "+https://github.com/darthdemono/clcbd-scraper)"
+        "+https://github.com/darthdemono/bdlaw-scraper)"
     ),
     "Accept": "text/html,application/xhtml+xml",
     "Accept-Language": "en-US,en;q=0.9",
@@ -80,31 +101,29 @@ HEADERS = {
 COLLECTIONS: dict[str, dict] = {
     "latinterms": {
         "url_template": f"{BASE_URL}/latinterms/{{id}}.html",
-        "max_id":       119,        # known upper bound; scraper stops here
-        "output":       "latinterms.md",
-        "title":        "Latin Terms",
-        "term_field":   "Title",    # <th> label whose <td> is the term
-        "def_field":    "Details",  # <th> label whose <td> is the definition
+        "max_id": 119,  # known upper bound; scraper stops here
+        "output": "latinterms.md",
+        "title": "Latin Terms",
+        "term_field": "Title",  # <th> label whose <td> is the term
+        "def_field": "Details",  # <th> label whose <td> is the definition
     },
     "lawdictionary": {
         "url_template": f"{BASE_URL}/lawdictionary/{{id}}.html",
-        "max_id":       None,       # open-ended; auto-detect
-        "output":       "lawdictionary.md",
-        "title":        "Law Dictionary",
-        "term_field":   "Title",
-        "def_field":    "Details",
+        "max_id": None,  # open-ended; auto-detect
+        "output": "lawdictionary.md",
+        "title": "Law Dictionary",
+        "term_field": "Title",
+        "def_field": "Details",
     },
     "glossary": {
         "url_template": f"{BASE_URL}/glossary/{{id}}.html",
-        "max_id":       None,       # open-ended; auto-detect
-        "output":       "glossary.md",
-        "title":        "Glossary",
-        "term_field":   "Title",
-        "def_field":    "Details",
+        "max_id": None,  # open-ended; auto-detect
+        "output": "glossary.md",
+        "title": "Glossary",
+        "term_field": "Title",
+        "def_field": "Details",
     },
 }
-
-
 
 
 # ---------------------------------------------------------------------------
@@ -112,16 +131,30 @@ COLLECTIONS: dict[str, dict] = {
 # ---------------------------------------------------------------------------
 @dataclass
 class Entry:
+    """One dictionary entry scraped from a clcbd.org detail page.
+
+    @param id          Numeric page ID from the site URL.
+    @param term        The term or Latin maxim (heading text).
+    @param definition  Plain-text definition or explanation.
+    @param category    Optional category label (e.g. "Civil Law"), may be "".
+    """
+
     id: int
     term: str
     definition: str
+    category: str = ""
 
 
 # ---------------------------------------------------------------------------
 # HTTP / caching
 # ---------------------------------------------------------------------------
-class Scraper:
-    """Thin requests.Session wrapper with retry, rate-limiting, and optional cache."""
+class Scraper(BaseScraper):
+    """clcbd-specific HTTP client built on BaseScraper.
+
+    Overrides _fetch_raw_inner to return None on 404 and on redirect
+    away from the requested detail page (the site sends 200 + redirect
+    to its index when an ID doesn't exist).
+    """
 
     def __init__(
         self,
@@ -129,62 +162,44 @@ class Scraper:
         max_retries: int = 4,
         timeout: int = 20,
         cache_dir: Optional[Path] = None,
+        force_refresh: bool = False,
     ) -> None:
-        self.delay    = delay
-        self.timeout  = timeout
-        self.cache_dir = cache_dir
-        self._last    = 0.0
+        super().__init__(
+            delay=delay,
+            max_retries=max_retries,
+            timeout=timeout,
+            cache_dir=cache_dir,
+            force_refresh=force_refresh,
+            logger_name="clcbd",
+            headers=HEADERS,
+        )
 
-        self.session = requests.Session()
-        self.session.headers.update(HEADERS)
-
-        if cache_dir:
-            cache_dir.mkdir(parents=True, exist_ok=True)
-
-        self._fetch_raw = retry(
-            retry=retry_if_exception_type(requests.RequestException),
-            stop=stop_after_attempt(max_retries),
-            wait=wait_exponential(multiplier=1, min=2, max=30),
-            before_sleep=before_sleep_log(logging.getLogger("clcbd"), logging.WARNING),
-            reraise=True,
-        )(self._fetch_raw_inner)
-
-    def _fetch_raw_inner(self, url: str) -> Optional[str]:
-        """Return page HTML or None on 404."""
-        elapsed = time.monotonic() - self._last
-        if elapsed < self.delay:
-            time.sleep(self.delay - elapsed)
+    def _fetch_raw_inner(self, url: str) -> Optional[str]:  # type: ignore[override]
+        """Return page HTML, or None on 404 / index redirect."""
+        self._throttle()
         resp = self.session.get(url, timeout=self.timeout, allow_redirects=True)
-        self._last = time.monotonic()
         if resp.status_code == 404:
             return None
         resp.raise_for_status()
-        # Detect redirect away from detail page (site sends 200 + redirect to index)
         if _is_index_page(resp.url, url):
             return None
         return resp.text
 
-    def fetch(self, url: str) -> Optional[BeautifulSoup]:
+    def fetch(self, url: str) -> Optional[BeautifulSoup]:  # type: ignore[override]
+        """Return a BeautifulSoup for url, None if the page doesn't exist.
+
+        Uses the disk cache when available (unless force_refresh is set).
         """
-        Returns a BeautifulSoup for *url*, None if the page doesn't exist,
-        or raises on unrecoverable HTTP errors.
-        Respects cache if --cache-dir given.
-        """
-        if self.cache_dir:
-            key      = re.sub(r"[^\w]", "_", url) + ".html"
-            cfile    = self.cache_dir / key
-            if cfile.exists():
-                logging.getLogger("clcbd").debug("Cache hit: %s", url)
-                return BeautifulSoup(cfile.read_text("utf-8"), "lxml")
+        cached = self._read_cache(url)
+        if cached is not None:
+            logging.getLogger("clcbd").debug("Cache hit: %s", url)
+            return BeautifulSoup(cached, "lxml")
 
         html = self._fetch_raw(url)
-
         if html is None:
             return None
 
-        if self.cache_dir:
-            cfile.write_text(html, "utf-8")  # type: ignore[possibly-undefined]
-
+        self._write_cache(url, html)
         return BeautifulSoup(html, "lxml")
 
 
@@ -199,7 +214,7 @@ def _is_index_page(final_url: str, requested_url: str) -> bool:
     if final_url == requested_url:
         return False
     # If final URL no longer contains the numeric ID segment, it's an index redirect
-    req_path  = requested_url.rsplit("/", 1)[-1]     # e.g. "1234.html"
+    req_path = requested_url.rsplit("/", 1)[-1]  # e.g. "1234.html"
     final_path = final_url.rsplit("/", 1)[-1]
     return req_path != final_path
 
@@ -262,7 +277,8 @@ def parse_entry(
     if not definition:
         return None
 
-    return Entry(id=entry_id, term=term, definition=definition)
+    category = fields.get("Category", fields.get("Type", ""))
+    return Entry(id=entry_id, term=term, definition=definition, category=category)
 
 
 # ---------------------------------------------------------------------------
@@ -286,7 +302,21 @@ def scrape_collection(
     scraper: Scraper,
     max_id_override: Optional[int],
     log: logging.Logger,
+    from_id: int = 1,
 ) -> list[Entry]:
+    """Scrape all entries from one clcbd.org dictionary collection.
+
+    Iterates IDs sequentially from from_id, stopping at max_id or after
+    DEAD_STREAK_LIMIT consecutive misses for open-ended collections.
+
+    @param name            Collection key (e.g. "lawdictionary").
+    @param config          Config dict from COLLECTIONS.
+    @param scraper         Scraper instance.
+    @param max_id_override Override the collection's built-in max_id cap.
+    @param log             Logger instance.
+    @param from_id         First ID to fetch (for resuming partial runs).
+    @return                List of Entry objects in ID order.
+    """
     url_tpl    = config["url_template"]
     term_field = config["term_field"]
     def_field  = config["def_field"]
@@ -298,9 +328,8 @@ def scrape_collection(
     entries: list[Entry] = []
     seen_terms: set[str] = set()
 
-    # consecutive_dead counts IDs in a row that added no new entry
     consecutive_dead = 0
-    current_id       = 1
+    current_id = from_id
 
     log.info("── %s ──", title)
 
@@ -334,7 +363,9 @@ def scrape_collection(
             try:
                 soup = scraper.fetch(url)
             except requests.HTTPError as exc:
-                log.warning("HTTP %s on ID %d — skipping", exc.response.status_code, current_id)
+                log.warning(
+                    "HTTP %s on ID %d — skipping", exc.response.status_code, current_id
+                )
             except requests.RequestException as exc:
                 log.error("Request failed on ID %d: %s", current_id, exc)
 
@@ -354,7 +385,9 @@ def scrape_collection(
                     dead = True
                 elif entry.term in seen_terms:
                     # Duplicate — skip silently, count as dead
-                    log.debug("Duplicate '%s' at ID %d — skipping", entry.term, current_id)
+                    log.debug(
+                        "Duplicate '%s' at ID %d — skipping", entry.term, current_id
+                    )
                     dead = True
                 else:
                     # Good new entry
@@ -393,21 +426,62 @@ def scrape_collection(
 # ---------------------------------------------------------------------------
 # Markdown writer
 # ---------------------------------------------------------------------------
+
 def write_markdown(entries: list[Entry], config: dict, output_path: Path) -> None:
-    title = config["title"]
-    lines = [
+    """Write entries as Obsidian-compatible Markdown with YAML frontmatter.
+
+    Format:
+      YAML block  — title, source URL, scraped_at date, entry count.
+      # H1        — collection title.
+      ## Term     — one heading per entry.
+      *Category*  — italic category label (omitted if empty).
+      Definition  — plain paragraph (no table escaping needed).
+      ---         — horizontal rule between entries for semantic chunking.
+
+    Writes atomically via a .tmp file renamed on success.
+
+    @param entries      List of Entry objects to render.
+    @param config       Collection config dict (for title and url_template).
+    @param output_path  Destination .md file path.
+    """
+    from datetime import datetime, timezone
+
+    title      = config["title"]
+    source_url = config["url_template"].replace("/{id}.html", "/")
+    scraped_at = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    safe_title = title.replace('"', '\\"')
+
+    lines: list[str] = [
+        "---",
+        f'title: "{safe_title}"',
+        f"source: {source_url}",
+        f"scraped_at: {scraped_at}",
+        f"entries: {len(entries)}",
+        "---",
+        "",
         f"# {title}",
         "",
-        f"| Term | Definition |",
-        f"|------|------------|",
+        f"*{len(entries)} entries — scraped from clcbd.org*",
+        "",
     ]
+
     for e in entries:
-        term = _md_escape(e.term)
-        defn = _md_escape(e.definition)
-        lines.append(f"| {term} | {defn} |")
+        lines.append("---")
+        lines.append("")
+        lines.append(f"## {e.term}")
+        lines.append("")
+        if e.category:
+            lines.append(f"*{e.category}*")
+            lines.append("")
+        lines.append(e.definition)
+        lines.append("")
+
+    lines.append("---")
     lines.append("")
 
-    output_path.write_text("\n".join(lines), encoding="utf-8")
+    tmp = output_path.with_suffix(".md.tmp")
+    tmp.write_text("\n".join(lines), encoding="utf-8")
+    tmp.replace(output_path)
 
 
 # ---------------------------------------------------------------------------
@@ -415,21 +489,24 @@ def write_markdown(entries: list[Entry], config: dict, output_path: Path) -> Non
 # ---------------------------------------------------------------------------
 @click.command()
 @click.option(
-    "--collection", "-c",
+    "--collection",
+    "-c",
     type=click.Choice(["all", "latinterms", "lawdictionary", "glossary"]),
     default="all",
     show_default=True,
     help="Which collection(s) to scrape.",
 )
 @click.option(
-    "--output-dir", "-o",
+    "--output-dir",
+    "-o",
     default=".",
     show_default=True,
     type=click.Path(),
     help="Directory where .md files are written.",
 )
 @click.option(
-    "--max-id", "-m",
+    "--max-id",
+    "-m",
     default=None,
     type=int,
     help=(
@@ -438,14 +515,16 @@ def write_markdown(entries: list[Entry], config: dict, output_path: Path) -> Non
     ),
 )
 @click.option(
-    "--delay", "-d",
+    "--delay",
+    "-d",
     default=0.3,
     show_default=True,
     type=float,
     help="Minimum seconds between HTTP requests.",
 )
 @click.option(
-    "--retries", "-r",
+    "--retries",
+    "-r",
     default=4,
     show_default=True,
     type=int,
@@ -458,7 +537,27 @@ def write_markdown(entries: list[Entry], config: dict, output_path: Path) -> Non
     help="Directory for raw HTML cache. Skips fetch on subsequent runs.",
 )
 @click.option(
-    "--verbose", "-v",
+    "--from-id",
+    default=1,
+    show_default=True,
+    type=int,
+    help="First entry ID to fetch. Use to resume a partial run.",
+)
+@click.option(
+    "--skip-existing",
+    is_flag=True,
+    default=False,
+    help="Skip collections whose output .md file already exists.",
+)
+@click.option(
+    "--force-refresh",
+    is_flag=True,
+    default=False,
+    help="Ignore disk cache and fetch live pages.",
+)
+@click.option(
+    "--verbose",
+    "-v",
     is_flag=True,
     default=False,
     help="Enable DEBUG-level logging.",
@@ -470,9 +569,12 @@ def main(
     delay: float,
     retries: int,
     cache_dir: Optional[str],
+    from_id: int,
+    skip_existing: bool,
+    force_refresh: bool,
     verbose: bool,
 ) -> None:
-    """Scrape law dictionary, Latin terms, and glossary from clcbd.org."""
+    """Scrape legal reference dictionaries (Law Dictionary, Latin Terms, Glossary) from clcbd.org."""
 
     # --- logging ---
     level = logging.DEBUG if verbose else logging.INFO
@@ -490,11 +592,16 @@ def main(
         )
     log = logging.getLogger("clcbd")
 
-    out_path   = Path(output_dir)
+    out_path = Path(output_dir)
     out_path.mkdir(parents=True, exist_ok=True)
     cache_path = Path(cache_dir) if cache_dir else None
 
-    scraper = Scraper(delay=delay, max_retries=retries, cache_dir=cache_path)
+    scraper = Scraper(
+        delay=delay,
+        max_retries=retries,
+        cache_dir=cache_path,
+        force_refresh=force_refresh,
+    )
 
     targets = (
         list(COLLECTIONS.items())
@@ -503,6 +610,10 @@ def main(
     )
 
     for name, cfg in targets:
+        dest = out_path / cfg["output"]
+        if skip_existing and dest.exists():
+            log.info("Skipping %s — %s already exists", name, dest)
+            continue
         try:
             entries = scrape_collection(
                 name=name,
@@ -510,10 +621,10 @@ def main(
                 scraper=scraper,
                 max_id_override=max_id if name != "latinterms" else None,
                 log=log,
+                from_id=from_id,
             )
-            dest = out_path / cfg["output"]
             write_markdown(entries, cfg, dest)
-            log.info("✅  %s → %s  (%d rows)", name, dest, len(entries))
+            log.info("✅  %s → %s  (%d entries)", name, dest, len(entries))
         except KeyboardInterrupt:
             log.warning("Interrupted — partial output may have been written.")
             sys.exit(130)
