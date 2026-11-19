@@ -10,6 +10,7 @@
 ### Fixed
 
 - Cross-references to several sections at once ("sections 64, 65, 66 and 445") only linked the first number. Every known section in the list is now linked; a quantity after "and" ("sections 3 and 4 years") is left alone.
+- "Firstly: ...", "Secondly: ..." paragraphs are lists too, and the list that follows an item (for example (1) and (2) under "Fourthly") nests under it. An inline "(a)" in the item opens that sub-list.
 - "First.- ...", "Second. ..." paragraphs (section 21 of the Penal Code and similar) are now real lists with the word as the marker.
 - Illustration lists inside callouts carried the section's running number ("5.") and rendered as plain text. Each callout list now starts at 1.
 - Headings that link nowhere and hold a footnote reference showed as literal "[...](#)" (328 headings in 117 acts). They are plain headings now, and amendment brackets inside a title are dropped.
