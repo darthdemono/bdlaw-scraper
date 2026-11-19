@@ -34,6 +34,7 @@ bdlaw-dictionaries = "bdlaw_scraper.dictionaries:main"
 bdlaw-translate = "bdlaw_scraper.translate:main"
 bdlaw-pdf2md = "bdlaw_scraper.pdf2md:main"
 bdlaw-terms = "bdlaw_scraper.terms:main"
+bdlaw-wilson = "bdlaw_scraper.wilson:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
