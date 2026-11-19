@@ -65,12 +65,18 @@ def tesseract(image_path: str, scripts: list[str]) -> str:
     return script_text(out, scripts)
 
 
+def word_id(n: dict) -> str:
+    """Stable id of a native word: its page and the top left corner of its first box."""
+    x0, y0 = n["boxes"][0][:2]
+    return f"{n['page']}:{x0}:{y0}"
+
+
 def jobs(entries: list[dict]):
-    """(entry index, native index, page, lang, boxes) for every native word that has a box."""
-    for i, e in enumerate(entries):
-        for j, n in enumerate(e["native"]):
+    """(id, page, lang, boxes) for every native word that has a box."""
+    for e in entries:
+        for n in e["native"]:
             if n.get("boxes"):
-                yield i, j, n["page"], n["lang"], n["boxes"]
+                yield word_id(n), n["page"], n["lang"], n["boxes"]
 
 
 @click.command()
@@ -87,15 +93,15 @@ def main(pdf: str, entries: str, output: str, limit: int, batch: int) -> None:
 
     data = json.loads(Path(entries).read_text(encoding="utf-8"))
     out = Path(output)
-    done = {tuple(json.loads(l)["key"]) for l in out.read_text().splitlines()} if out.exists() else set()
-    todo = [j for j in jobs(data) if (j[0], j[1]) not in done]
+    done = {json.loads(l)["id"] for l in out.read_text().splitlines()} if out.exists() else set()
+    todo = [j for j in jobs(data) if j[0] not in done]
     if limit:
         todo = todo[:limit]
     rec = RecognitionPredictor(FoundationPredictor())
     k = 300 / 72
     by_page: dict[int, list] = {}
     for j in todo:
-        by_page.setdefault(j[2], []).append(j)
+        by_page.setdefault(j[1], []).append(j)
 
     def flush(pending: list, images: list, tmp: Path, fh) -> None:
         results = rec(images, bboxes=[[[0, 0, im.width, im.height]] for im in images], recognition_batch_size=16)  # each crop is one line: no detection pass if images else []
@@ -109,7 +115,7 @@ def main(pdf: str, entries: str, output: str, limit: int, batch: int) -> None:
         for n, t in zip(retry, second):
             texts[n] = t
         for n, ((key, lang, idx), text) in enumerate(zip(pending, texts)):
-            g = grouped.setdefault(key, {"key": list(key), "lang": lang, "parts": []})
+            g = grouped.setdefault(key, {"id": key, "lang": lang, "parts": []})
             g["parts"].append({"text": text, "engine": ("tesseract" if n in retry else "surya") if text else None})
         for g in grouped.values():
             texts = [p["text"] for p in g["parts"] if p["text"]]
@@ -136,10 +142,10 @@ def main(pdf: str, entries: str, output: str, limit: int, batch: int) -> None:
                 im, ahead[n_page - 1] = ahead[n_page - 1].result(), None  # drop the future so old pages are freed
                 if n_page + 1 < len(pages):
                     ahead.append(renderer.submit(render, pages[n_page + 1][0]))
-                for i, j, _p, lang, boxes in group:
+                for wid, _p, lang, boxes in group:
                     for b, (x0, y0, x1, y1) in enumerate(boxes):
                         c = im.crop((int((x0 - PAD_SIDE_PT) * k), int((y0 - PAD_TOP_PT) * k), int((x1 + PAD_SIDE_PT) * k), int((y1 + 1) * k)))
-                        pending.append(((i, j), lang, b))
+                        pending.append((wid, lang, b))
                         images.append(c.resize((c.width * 2, c.height * 2)))
                 if len(images) >= batch:
                     flush(pending, images, tmp, fh)
