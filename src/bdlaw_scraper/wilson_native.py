@@ -82,7 +82,6 @@ def jobs(entries: list[dict]):
 def main(pdf: str, entries: str, output: str, limit: int, batch: int) -> None:
     """Read the native-script words of Wilson's glossary from page crops."""
     from PIL import Image
-    from surya.detection import DetectionPredictor
     from surya.foundation import FoundationPredictor
     from surya.recognition import RecognitionPredictor
 
@@ -92,14 +91,14 @@ def main(pdf: str, entries: str, output: str, limit: int, batch: int) -> None:
     todo = [j for j in jobs(data) if (j[0], j[1]) not in done]
     if limit:
         todo = todo[:limit]
-    rec, det = RecognitionPredictor(FoundationPredictor()), DetectionPredictor()
+    rec = RecognitionPredictor(FoundationPredictor())
     k = 300 / 72
     by_page: dict[int, list] = {}
     for j in todo:
         by_page.setdefault(j[2], []).append(j)
 
     def flush(pending: list, images: list, tmp: Path, fh) -> None:
-        results = rec(images, det_predictor=det, detection_batch_size=4, recognition_batch_size=8) if images else []
+        results = rec(images, bboxes=[[[0, 0, im.width, im.height]] for im in images], recognition_batch_size=16)  # each crop is one line: no detection pass if images else []
         grouped: dict[tuple, dict] = {}
         texts = [script_text(" ".join(l.text for l in res.text_lines), allowed_scripts(lang)) for (_k, lang, _i), res in zip(pending, results)]
         retry = [n for n, t in enumerate(texts) if not t]  # wrong or no script from surya: tesseract, four at a time
