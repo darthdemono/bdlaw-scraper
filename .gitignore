@@ -1,12 +1,49 @@
-old/
-*.pdf
+# Scraped data and caches (large, and owned by the source sites)
+acts/
+acts_*/
 cache/
 pdf/
+*.log
+.progress.json
+.numbering/
+act-*.md
+act-index.md
+
+# Local test scratch
 test/
-.claude/
+
+# Python
 __pycache__/
 *.pyc
-act-*.md
-.env
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 venv/
-acts/
+.venv/
+
+# Environment
+.env
+.env.*
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+
+# Local working files
+.agents/
+.claude/
+.codex/
+.gemini/
+.serena/
+Handoff/
+handoff/
+Research/
+research/
+CLAUDE*.md
+AGENTS*.md
+CODEX*.md
+GEMINI*.md

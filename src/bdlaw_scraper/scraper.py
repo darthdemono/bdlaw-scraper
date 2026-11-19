@@ -34,12 +34,12 @@ Batch
 
 Wikilink format
     All cross-act links use [[act-N\\|Display Text]] (escaped pipe) for
-    compatibility with Obsidian tables and Quartz static site generation.
+    compatibility with Obsidian tables and static site generators.
 
 Usage
 -----
-    Single act : python bdlaw_scraper.py --act 1710
-    All acts   : python bdlaw_scraper.py --all --output-dir acts --workers 8
+    Single act : bdlaw-scraper --act 1710
+    All acts   : bdlaw-scraper --all --output-dir acts --workers 8
 """
 
 from __future__ import annotations
@@ -62,17 +62,26 @@ import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from bs4 import BeautifulSoup, NavigableString, Tag
 from tenacity import (
-    before_sleep_log, retry, retry_if_exception_type,
-    stop_after_attempt, wait_exponential,
+    before_sleep_log,
+    retry,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential,
 )
+from .http import BaseScraper
 
 try:
     from rich.console import Console
     from rich.logging import RichHandler
     from rich.progress import (
-        BarColumn, MofNCompleteColumn, Progress, SpinnerColumn,
-        TextColumn, TimeElapsedColumn,
+        BarColumn,
+        MofNCompleteColumn,
+        Progress,
+        SpinnerColumn,
+        TextColumn,
+        TimeElapsedColumn,
     )
+
     _RICH = True
     console = Console(stderr=True)
 except ImportError:
@@ -95,63 +104,185 @@ HEADERS = {
 BENGALI_DIGIT_MAP = str.maketrans("০১২৩৪৫৬৭৮৯", "0123456789")
 
 _BN_MONTH_MAP: dict[str, int] = {
-    'জানুয়ারি': 1, 'জানুয়ারী': 1, 'ফেব্রুয়ারি': 2, 'ফেব্রুয়ারী': 2,
-    'মার্চ': 3, 'এপ্রিল': 4, 'মে': 5, 'জুন': 6, 'জুলাই': 7,
-    'আগস্ট': 8, 'আগষ্ট': 8, 'সেপ্টেম্বর': 9, 'অক্টোবর': 10,
-    'নভেম্বর': 11, 'ডিসেম্বর': 12,
+    "জানুয়ারি": 1,
+    "জানুয়ারী": 1,
+    "ফেব্রুয়ারি": 2,
+    "ফেব্রুয়ারী": 2,
+    "মার্চ": 3,
+    "এপ্রিল": 4,
+    "মে": 5,
+    "জুন": 6,
+    "জুলাই": 7,
+    "আগস্ট": 8,
+    "আগষ্ট": 8,
+    "সেপ্টেম্বর": 9,
+    "অক্টোবর": 10,
+    "নভেম্বর": 11,
+    "ডিসেম্বর": 12,
 }
 _EN_MONTH_MAP: dict[str, int] = {
-    'january': 1, 'february': 2, 'march': 3, 'april': 4, 'may': 5,
-    'june': 6, 'july': 7, 'august': 8, 'september': 9, 'october': 10,
-    'november': 11, 'december': 12,
+    "january": 1,
+    "february": 2,
+    "march": 3,
+    "april": 4,
+    "may": 5,
+    "june": 6,
+    "july": 7,
+    "august": 8,
+    "september": 9,
+    "october": 10,
+    "november": 11,
+    "december": 12,
 }
 _ORDINAL_WORDS: dict[str, int] = {
-    'first': 1, 'second': 2, 'third': 3, 'fourth': 4, 'fifth': 5,
-    'sixth': 6, 'seventh': 7, 'eighth': 8, 'ninth': 9, 'tenth': 10,
-    'eleventh': 11, 'twelfth': 12, 'thirteenth': 13, 'fourteenth': 14,
-    'fifteenth': 15, 'sixteenth': 16, 'seventeenth': 17, 'eighteenth': 18,
-    'nineteenth': 19, 'twentieth': 20, 'twenty-first': 21, 'twenty-second': 22,
-    'twenty-third': 23, 'twenty-fourth': 24, 'twenty-fifth': 25,
-    'twenty-sixth': 26, 'twenty-seventh': 27, 'twenty-eighth': 28,
-    'twenty-ninth': 29, 'thirtieth': 30, 'thirty-first': 31,
+    "first": 1,
+    "second": 2,
+    "third": 3,
+    "fourth": 4,
+    "fifth": 5,
+    "sixth": 6,
+    "seventh": 7,
+    "eighth": 8,
+    "ninth": 9,
+    "tenth": 10,
+    "eleventh": 11,
+    "twelfth": 12,
+    "thirteenth": 13,
+    "fourteenth": 14,
+    "fifteenth": 15,
+    "sixteenth": 16,
+    "seventeenth": 17,
+    "eighteenth": 18,
+    "nineteenth": 19,
+    "twentieth": 20,
+    "twenty-first": 21,
+    "twenty-second": 22,
+    "twenty-third": 23,
+    "twenty-fourth": 24,
+    "twenty-fifth": 25,
+    "twenty-sixth": 26,
+    "twenty-seventh": 27,
+    "twenty-eighth": 28,
+    "twenty-ninth": 29,
+    "thirtieth": 30,
+    "thirty-first": 31,
 }
 _BN_LETTER_TO_LATIN: dict[str, str] = {
-    'ক': 'a', 'খ': 'b', 'গ': 'c', 'ঘ': 'd', 'ঙ': 'e',
-    'চ': 'f', 'ছ': 'g', 'জ': 'h', 'ঝ': 'i', 'ঞ': 'j',
-    'ট': 'k', 'ঠ': 'l', 'ড': 'm', 'ঢ': 'n', 'ণ': 'o',
-    'ত': 'p', 'থ': 'q', 'দ': 'r', 'ধ': 's', 'ন': 't',
+    "ক": "a",
+    "খ": "b",
+    "গ": "c",
+    "ঘ": "d",
+    "ঙ": "e",
+    "চ": "f",
+    "ছ": "g",
+    "জ": "h",
+    "ঝ": "i",
+    "ঞ": "j",
+    "ট": "k",
+    "ঠ": "l",
+    "ড": "m",
+    "ঢ": "n",
+    "ণ": "o",
+    "ত": "p",
+    "থ": "q",
+    "দ": "r",
+    "ধ": "s",
+    "ন": "t",
 }
-_BN_CONS   = "কখগঘঙচছজঝঞটঠডঢণতথদধনপফবভমযরলশষসহড়ঢ়য়ৎ"
+_BN_CONS = "কখগঘঙচছজঝঞটঠডঢণতথদধনপফবভমযরলশষসহড়ঢ়য়ৎ"
 _BN_VOWELS = "অআইঈউঊঋএঐওঔ"
-_BN_DANDA  = "৷।॥"
+_BN_DANDA = "৷।॥"
 
 _BLOCK_ELEMENTS = {
-    "p", "div", "li", "tr", "td", "th",
-    "h1", "h2", "h3", "h4", "h5", "h6",
-    "blockquote", "section", "article", "ul", "ol",
+    "p",
+    "div",
+    "li",
+    "tr",
+    "td",
+    "th",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "blockquote",
+    "section",
+    "article",
+    "ul",
+    "ol",
 }
 
 # List type -> nesting depth
 _LIST_DEPTH: dict[str, int] = {
-    "decimal":    1,  # (1)(2)(3)  — top level
-    "bn_alpha":   1,  # (ক)(খ)(গ)  — top level (Bengali acts)
-    "alpha":      2,  # (a)(b)(c)  — sub-items
+    "decimal": 1,  # (1)(2)(3)  — top level
+    "bn_alpha": 1,  # (ক)(খ)(গ)  — top level (Bengali acts)
+    "alpha": 2,  # (a)(b)(c)  — sub-items
     "bn_decimal": 2,  # (১)(২)(৩)  — sub-items (Bengali acts)
-    "roman":      3,  # (i)(ii)    — sub-sub-items
-    "bn_vowel":   3,  # (অ)(আ)     — sub-sub-items (Bengali acts)
+    "roman": 3,  # (i)(ii)    — sub-sub-items
+    "bn_vowel": 3,  # (অ)(আ)     — sub-sub-items (Bengali acts)
 }
 _LIST_INDENT = 3  # spaces per depth level
 
 # Words that cannot end a sentence — used to detect mid-sentence HTML line breaks
-_CANNOT_END_SENTENCE_WORDS = frozenset({
-    'a', 'an', 'the', 'of', 'for', 'in', 'on', 'at', 'to', 'by', 'with',
-    'from', 'into', 'upon', 'about', 'under', 'over', 'after', 'before',
-    'between', 'is', 'are', 'was', 'were', 'be', 'been', 'has', 'have',
-    'had', 'will', 'shall', 'may', 'can', 'must', 'not', 'and', 'or',
-    'but', 'that', 'which', 'who', 'if', 'as', 'than', 'whether',
-    'setting', 'including', 'being', 'having', 'making', 'following',
-    'providing', 'subject', 'pursuant',
-})
+_CANNOT_END_SENTENCE_WORDS = frozenset(
+    {
+        "a",
+        "an",
+        "the",
+        "of",
+        "for",
+        "in",
+        "on",
+        "at",
+        "to",
+        "by",
+        "with",
+        "from",
+        "into",
+        "upon",
+        "about",
+        "under",
+        "over",
+        "after",
+        "before",
+        "between",
+        "is",
+        "are",
+        "was",
+        "were",
+        "be",
+        "been",
+        "has",
+        "have",
+        "had",
+        "will",
+        "shall",
+        "may",
+        "can",
+        "must",
+        "not",
+        "and",
+        "or",
+        "but",
+        "that",
+        "which",
+        "who",
+        "if",
+        "as",
+        "than",
+        "whether",
+        "setting",
+        "including",
+        "being",
+        "having",
+        "making",
+        "following",
+        "providing",
+        "subject",
+        "pursuant",
+    }
+)
 
 # ---------------------------------------------------------------------------
 # Regex patterns
@@ -159,28 +290,46 @@ _CANNOT_END_SENTENCE_WORDS = frozenset({
 
 RE_MULTI_NEWLINE = re.compile(r"\n{3,}")
 
-RE_ALPHA_ITEM      = re.compile(r"^\(([a-zA-Z])\)\s+(.*)",           re.DOTALL)
-RE_ROMAN_ITEM      = re.compile(r"^\(([ivxlcdmIVXLCDM]+)\)\s+(.*)", re.DOTALL)
-RE_DECIMAL_ITEM    = re.compile(r"^\((\d+)\)\s+(.*)",                re.DOTALL)
-RE_BN_ALPHA_ITEM   = re.compile(r"^\(([" + _BN_CONS  + r"]+)\)\s+(.*)", re.DOTALL)
-RE_BN_DECIMAL_ITEM = re.compile(r"^\(([০-৯]+)\)\s+(.*)",             re.DOTALL)
-RE_BN_VOWEL_ITEM   = re.compile(r"^\(([" + _BN_VOWELS + r"])\)\s+(.*)", re.DOTALL)
+RE_ALPHA_ITEM = re.compile(r"^\(([a-zA-Z])\)\s+(.*)", re.DOTALL)
+RE_ROMAN_ITEM = re.compile(r"^\(([ivxlcdmIVXLCDM]+)\)\s+(.*)", re.DOTALL)
+RE_DECIMAL_ITEM = re.compile(r"^\((\d+)\)\s+(.*)", re.DOTALL)
+RE_BN_ALPHA_ITEM = re.compile(r"^\(([" + _BN_CONS + r"]+)\)\s+(.*)", re.DOTALL)
+RE_BN_DECIMAL_ITEM = re.compile(r"^\(([০-৯]+)\)\s+(.*)", re.DOTALL)
+RE_BN_VOWEL_ITEM = re.compile(r"^\(([" + _BN_VOWELS + r"])\)\s+(.*)", re.DOTALL)
 
 _SECNUM_CORE = r"[A-Za-z0-9]+(?:-[A-Za-z0-9]+)?(?:\.[A-Za-z0-9]+)?"
 RE_SECTION_NUM_BRACKET = re.compile(rf"^\[({_SECNUM_CORE})\s*\.\s*\]?\s*")
-RE_SECTION_NUM_PLAIN   = re.compile(rf"^({_SECNUM_CORE})\.(?:\s+|$)")
-RE_SECTION_NUM_CLAUSE  = re.compile(rf"^({_SECNUM_CORE})\.[\(\[]([A-Za-z0-9]+)[\)\]]")
-RE_BN_SECTION_NUM_PLAIN   = re.compile(r"^([০-৯]+[" + _BN_CONS + r"]?(?:\.[০-৯]+)?)[" + _BN_DANDA + r"]\s+")
-RE_BN_SECTION_NUM_CLAUSE  = re.compile(r"^([০-৯]+[" + _BN_CONS + r"]?)[" + _BN_DANDA + r"][\(\[]([০-৯" + _BN_CONS + r"]+)[\)\]]")
-RE_BN_SECTION_NUM_BRACKET = re.compile(r"^\[([০-৯]+[" + _BN_CONS + r"]?(?:\.[০-৯]+)?)[" + _BN_DANDA + r"]\]?\s*")
+RE_SECTION_NUM_PLAIN = re.compile(rf"^({_SECNUM_CORE})\.(?:\s+|$)")
+RE_SECTION_NUM_CLAUSE = re.compile(rf"^({_SECNUM_CORE})\.[\(\[]([A-Za-z0-9]+)[\)\]]")
+RE_BN_SECTION_NUM_PLAIN = re.compile(
+    r"^([০-৯]+[" + _BN_CONS + r"]?(?:\.[০-৯]+)?)[" + _BN_DANDA + r"]\s+"
+)
+RE_BN_SECTION_NUM_CLAUSE = re.compile(
+    r"^([০-৯]+["
+    + _BN_CONS
+    + r"]?)["
+    + _BN_DANDA
+    + r"][\(\[]([০-৯"
+    + _BN_CONS
+    + r"]+)[\)\]]"
+)
+RE_BN_SECTION_NUM_BRACKET = re.compile(
+    r"^\[([০-৯]+[" + _BN_CONS + r"]?(?:\.[০-৯]+)?)[" + _BN_DANDA + r"]\]?\s*"
+)
 
 RE_SUBCHAPTER_HEAD = re.compile(r"^([A-Z])\.\s*-\s*(.+)$")
 
-_RE_EXPL_NUMBERED  = re.compile(r"^Explanation\s+([IVXLCDM]+|\d+)\s*[-\u2013.]+\s*(.*)",  re.IGNORECASE)
-_RE_EXPL_SINGLE    = re.compile(r"^Explanation\s*[-\u2013.]+\s*(.*)",                       re.IGNORECASE)
-_RE_EXCEP_NUMBERED = re.compile(r"^Exception[s]?\s+([IVXLCDM]+|\d+)\s*[-\u2013.\u2014]+\s*(.*)", re.IGNORECASE)
-_RE_EXCEP_SINGLE   = re.compile(r"^Exception[s]?\s*[-\u2013.\u2014]+\s*(.*)",                     re.IGNORECASE)
-_RE_ILLUSTRATIONS  = re.compile(r"^Illustrations?\s*[-\u2013.]?\s*$",                             re.IGNORECASE)
+_RE_EXPL_NUMBERED = re.compile(
+    r"^Explanation\s+([IVXLCDM]+|\d+)\s*[-\u2013.]+\s*(.*)", re.IGNORECASE
+)
+_RE_EXPL_SINGLE = re.compile(r"^Explanation\s*[-\u2013.]+\s*(.*)", re.IGNORECASE)
+_RE_EXCEP_NUMBERED = re.compile(
+    r"^Exception[s]?\s+([IVXLCDM]+|\d+)\s*[-\u2013.\u2014]+\s*(.*)", re.IGNORECASE
+)
+_RE_EXCEP_SINGLE = re.compile(
+    r"^Exception[s]?\s*[-\u2013.\u2014]+\s*(.*)", re.IGNORECASE
+)
+_RE_ILLUSTRATIONS = re.compile(r"^Illustrations?\s*[-\u2013.]?\s*$", re.IGNORECASE)
 _RE_PROVIDED_STANDALONE = re.compile(
     r"^Provid(?:ed|e)\s*(?:further\s*)?(?:that\s*)?[-\u2013.:]+\s*$", re.IGNORECASE
 )
@@ -195,45 +344,57 @@ _RE_CONNECTOR = re.compile(
     re.IGNORECASE,
 )
 
-_RE_NEST_EXPL_START    = re.compile(r"^> \[!Explanation\]$")
+_RE_NEST_EXPL_START = re.compile(r"^> \[!Explanation\]$")
 _RE_NEST_SECONDARY_HDR = re.compile(r"^> \[!(Illustrations?|Exception[s]?)\]$")
 
-_RE_HEADING_FOOTNOTE    = re.compile(r"\[(\d{1,4})([^\d\]][^\]]*)\]")
-_RE_ANNOTATION_BRACKETS = re.compile(r"(?<!\[)\[(?!\s*\*)(?!\^)(?!\[)([^\[\]]*)\](?!\])", re.DOTALL)
-_RE_SUBST_LETTER        = re.compile(r"\[([A-Z])\]")
-_RE_BOILERPLATE_LINE    = re.compile(
+_RE_HEADING_FOOTNOTE = re.compile(r"\[(\d{1,4})([^\d\]][^\]]*)\]")
+_RE_ANNOTATION_BRACKETS = re.compile(
+    r"(?<!\[)\[(?!\s*\*)(?!\^)(?!\[)([^\[\]]*)\](?!\])", re.DOTALL
+)
+_RE_SUBST_LETTER = re.compile(r"\[([A-Z])\]")
+_RE_BOILERPLATE_LINE = re.compile(
     r"^\s*(CONTENTS|SECTIONS|SCHEDULE|PREAMBLE|WHEREAS|An Act to |It is hereby|https?://\S+)",
     re.IGNORECASE,
 )
-_RE_URL_ONLY    = re.compile(r"^\s*https?://\S+\s*$")
-_RE_TOC_LINK    = re.compile(r"^\s*\[.+?\]\(https?://")
+_RE_URL_ONLY = re.compile(r"^\s*https?://\S+\s*$")
+_RE_TOC_LINK = re.compile(r"^\s*\[.+?\]\(https?://")
 _RE_ISOLATED_LABEL = re.compile(
     r"^\(([a-zA-Z0-9" + _BN_CONS + _BN_VOWELS + r"০-৯]+)\)\s*$"
 )
 _RE_ANNOTATION_BRACKETS_PREAMBLE = re.compile(r"\[(?!\*\s*\*)(.*?)\]", re.DOTALL)
-_RE_BDLAWS_ACT   = re.compile(r"https?://bdlaws\.minlaw\.gov\.bd/act-(\d+)\.html")
-_RE_FN_PREFIX    = re.compile(r"^(\[\^\d+\])")
+_RE_BDLAWS_ACT = re.compile(r"https?://bdlaws\.minlaw\.gov\.bd/act-(\d+)\.html")
+_RE_FN_PREFIX = re.compile(r"^(\[\^\d+\])")
 _RE_RESIDUAL_HTML = re.compile(r"</?(li|ol|ul|p|div|span|br)[^>]*>", re.IGNORECASE)
 
 _MARGIN_CALLOUTS = [
-    (re.compile(r"^Saving[s]?\s*[-\u2013.\u2014]+\s*(.*)",      re.I), "Note",    "Saving"),
-    (re.compile(r"^Repeal[s]?\s*[-\u2013.\u2014]+\s*(.*)",      re.I), "Warning", "Repeal"),
-    (re.compile(r"^Commencement\s*[-\u2013.\u2014]+\s*(.*)",    re.I), "Info",    "Commencement"),
-    (re.compile(r"^Short\s+title\s*[-\u2013.\u2014]+\s*(.*)",   re.I), "Info",    "Short title"),
+    (re.compile(r"^Saving[s]?\s*[-\u2013.\u2014]+\s*(.*)", re.I), "Note", "Saving"),
+    (re.compile(r"^Repeal[s]?\s*[-\u2013.\u2014]+\s*(.*)", re.I), "Warning", "Repeal"),
+    (
+        re.compile(r"^Commencement\s*[-\u2013.\u2014]+\s*(.*)", re.I),
+        "Info",
+        "Commencement",
+    ),
+    (
+        re.compile(r"^Short\s+title\s*[-\u2013.\u2014]+\s*(.*)", re.I),
+        "Info",
+        "Short title",
+    ),
 ]
 
-_RE_STATUS_OMITTED  = re.compile(r"^\[?[Oo]mitted\]?\.?\s*$")
+_RE_STATUS_OMITTED = re.compile(r"^\[?[Oo]mitted\]?\.?\s*$")
 _RE_STATUS_REPEALED = re.compile(r"^\[?[Rr]epealed\]?\.?\s*$")
 _RE_PUNISHMENT = re.compile(
     r"(?<!\*)\b(shall be punished with|shall be punished|shall be liable|"
     r"shall be guilty of|imprisonment for life|rigorous imprisonment)\b(?!\*)",
     re.IGNORECASE,
 )
-_RE_OMITTED_INLINE  = re.compile(r"\b(Omitted by [^.;]*[.;])",  re.IGNORECASE)
+_RE_OMITTED_INLINE = re.compile(r"\b(Omitted by [^.;]*[.;])", re.IGNORECASE)
 _RE_REPEALED_INLINE = re.compile(r"\b(Repealed by [^.;]*[.;])", re.IGNORECASE)
-_RE_SECTION_REF     = re.compile(r"\b(sections?)\s+(\d+[A-Za-z]?(?:-[A-Za-z0-9]+)?)\b", re.IGNORECASE)
-_RE_DEFINITION      = re.compile(
-    r'^(?:In this (?:Act|section|chapter|Part|Code)[,;]?\s+)?'
+_RE_SECTION_REF = re.compile(
+    r"\b(sections?)\s+(\d+[A-Za-z]?(?:-[A-Za-z0-9]+)?)\b", re.IGNORECASE
+)
+_RE_DEFINITION = re.compile(
+    r"^(?:In this (?:Act|section|chapter|Part|Code)[,;]?\s+)?"
     r'"([^"]{1,80})"\s+(means?|includes?|denotes?)\s+(.+)',
     re.IGNORECASE,
 )
@@ -243,26 +404,154 @@ _RE_DEFINITION      = re.compile(
 # ---------------------------------------------------------------------------
 
 _TAG_KEYWORDS: dict[str, list[str]] = {
-    "CriminalLaw":          ["criminal", "penal code", "crime", "offence", "punishment", "magistrate", "prosecution", "accusation", "culpable"],
-    "CivilLaw":             ["civil procedure", "civil court", "plaintiff", "defendant", "decree", "execution of decree", "suit"],
-    "ConstitutionalLaw":    ["constitution", "fundamental right", "parliament", "republic", "citizenship", "sovereignty"],
-    "CommercialLaw":        ["commerce", "contract", "sale of goods", "company", "partnership", "arbitration", "mercantile"],
-    "BankingAndFinance":    ["bank", "banking", "financial institution", "loan", "credit", "monetary", "interest"],
-    "TaxLaw":               ["tax", "revenue", "customs", "excise", "vat", "income tax", "duty", "tariff"],
-    "LabourLaw":            ["labour", "labor", "employment", "worker", "factory", "wages", "trade union"],
-    "FamilyLaw":            ["marriage", "divorce", "matrimonial", "guardian", "inheritance", "succession", "dower"],
-    "PropertyLaw":          ["property", "land", "tenancy", "mortgage", "transfer of property", "registration"],
-    "EvidenceLaw":          ["evidence", "witness", "proof", "admissibility"],
-    "ProceduralLaw":        ["procedure code", "jurisdiction", "appeal", "tribunal", "high court", "supreme court"],
-    "EnvironmentalLaw":     ["environment", "pollution", "forest", "wildlife", "biodiversity", "conservation"],
-    "EducationLaw":         ["education", "university", "school", "examination", "academic", "degree"],
-    "HealthLaw":            ["health", "medical", "hospital", "drug", "medicine", "pharmacy", "epidemic"],
-    "AdministrativeLaw":    ["government", "administration", "ministry", "officer", "public servant", "gazette"],
-    "MilitaryLaw":          ["army", "navy", "air force", "military", "armed forces", "defence"],
-    "SecurityLaw":          ["security", "national security", "intelligence", "police", "special branch"],
-    "ImmigrationLaw":       ["passport", "visa", "immigration","citizenship", "nationality", "refugee"],
-    "InsuranceLaw":         ["insurance", "insurer", "policy", "indemnity", "premium"],
-    "IntellectualProperty": ["copyright", "patent", "trademark", "intellectual property", "design"],
+    "CriminalLaw": [
+        "criminal",
+        "penal code",
+        "crime",
+        "offence",
+        "punishment",
+        "magistrate",
+        "prosecution",
+        "accusation",
+        "culpable",
+    ],
+    "CivilLaw": [
+        "civil procedure",
+        "civil court",
+        "plaintiff",
+        "defendant",
+        "decree",
+        "execution of decree",
+        "suit",
+    ],
+    "ConstitutionalLaw": [
+        "constitution",
+        "fundamental right",
+        "parliament",
+        "republic",
+        "citizenship",
+        "sovereignty",
+    ],
+    "CommercialLaw": [
+        "commerce",
+        "contract",
+        "sale of goods",
+        "company",
+        "partnership",
+        "arbitration",
+        "mercantile",
+    ],
+    "BankingAndFinance": [
+        "bank",
+        "banking",
+        "financial institution",
+        "loan",
+        "credit",
+        "monetary",
+        "interest",
+    ],
+    "TaxLaw": [
+        "tax",
+        "revenue",
+        "customs",
+        "excise",
+        "vat",
+        "income tax",
+        "duty",
+        "tariff",
+    ],
+    "LabourLaw": [
+        "labour",
+        "labor",
+        "employment",
+        "worker",
+        "factory",
+        "wages",
+        "trade union",
+    ],
+    "FamilyLaw": [
+        "marriage",
+        "divorce",
+        "matrimonial",
+        "guardian",
+        "inheritance",
+        "succession",
+        "dower",
+    ],
+    "PropertyLaw": [
+        "property",
+        "land",
+        "tenancy",
+        "mortgage",
+        "transfer of property",
+        "registration",
+    ],
+    "EvidenceLaw": ["evidence", "witness", "proof", "admissibility"],
+    "ProceduralLaw": [
+        "procedure code",
+        "jurisdiction",
+        "appeal",
+        "tribunal",
+        "high court",
+        "supreme court",
+    ],
+    "EnvironmentalLaw": [
+        "environment",
+        "pollution",
+        "forest",
+        "wildlife",
+        "biodiversity",
+        "conservation",
+    ],
+    "EducationLaw": [
+        "education",
+        "university",
+        "school",
+        "examination",
+        "academic",
+        "degree",
+    ],
+    "HealthLaw": [
+        "health",
+        "medical",
+        "hospital",
+        "drug",
+        "medicine",
+        "pharmacy",
+        "epidemic",
+    ],
+    "AdministrativeLaw": [
+        "government",
+        "administration",
+        "ministry",
+        "officer",
+        "public servant",
+        "gazette",
+    ],
+    "MilitaryLaw": ["army", "navy", "air force", "military", "armed forces", "defence"],
+    "SecurityLaw": [
+        "security",
+        "national security",
+        "intelligence",
+        "police",
+        "special branch",
+    ],
+    "ImmigrationLaw": [
+        "passport",
+        "visa",
+        "immigration",
+        "citizenship",
+        "nationality",
+        "refugee",
+    ],
+    "InsuranceLaw": ["insurance", "insurer", "policy", "indemnity", "premium"],
+    "IntellectualProperty": [
+        "copyright",
+        "patent",
+        "trademark",
+        "intellectual property",
+        "design",
+    ],
 }
 
 # ---------------------------------------------------------------------------
@@ -282,13 +571,16 @@ def setup_logging(verbose: bool) -> logging.Logger:
     level = logging.DEBUG if verbose else logging.INFO
     if _RICH:
         logging.basicConfig(
-            level=level, format="%(message)s",
+            level=level,
+            format="%(message)s",
             handlers=[RichHandler(console=console, show_path=False, markup=True)],
         )
     else:
-        logging.basicConfig(level=level,
-                            format="%(asctime)s [%(levelname)s] %(message)s",
-                            datefmt="%H:%M:%S")
+        logging.basicConfig(
+            level=level,
+            format="%(asctime)s [%(levelname)s] %(message)s",
+            datefmt="%H:%M:%S",
+        )
     return logging.getLogger("bdlaw")
 
 
@@ -306,6 +598,7 @@ class SectionItem:
     @param html     BeautifulSoup Tag for the section body HTML (div.txt-details).
     @param number   Parsed section number string (e.g. "4A", "৩"), or None.
     """
+
     heading: str
     url: str
     html: Tag
@@ -319,6 +612,7 @@ class ChapterItem:
     @param name  Full chapter label including number and title.
     @param url   Link to chapter page, or "#" if not resolved.
     """
+
     name: str
     url: str = "#"
 
@@ -332,6 +626,7 @@ class SubChapterItem:
     @param parent_number  Section number of the preceding section.
     @param url            Link, or "#" if not resolved.
     """
+
     letter: str
     subtitle: str
     parent_number: str
@@ -345,6 +640,7 @@ class PartItem:
     @param name  Full label including part number and subtitle.
     @param url   Absolute URL to the part page.
     """
+
     name: str
     url: str
 
@@ -355,6 +651,7 @@ class PreambleItem:
 
     @param text  Cleaned plain-text preamble (no HTML, no footnote markers).
     """
+
     text: str
 
 
@@ -365,10 +662,13 @@ class FootnotesItem:
     @param notes  List of (footnote_number, markdown_text) pairs.
                   Links inside notes are already converted to [[wikilinks]].
     """
+
     notes: list[tuple[int, str]]
 
 
-DocNode = PartItem | ChapterItem | SubChapterItem | SectionItem | PreambleItem | FootnotesItem
+DocNode = (
+    PartItem | ChapterItem | SubChapterItem | SectionItem | PreambleItem | FootnotesItem
+)
 """Union type representing every possible structural node of an act document."""
 
 
@@ -377,78 +677,50 @@ DocNode = PartItem | ChapterItem | SubChapterItem | SectionItem | PreambleItem |
 # ---------------------------------------------------------------------------
 
 
-class Scraper:
-    """Rate-limited HTTP client with exponential-backoff retry and disk cache.
+class Scraper(BaseScraper):
+    """bdlaws-specific HTTP client built on BaseScraper.
 
-    Enforces a minimum delay between requests so the bdlaws server is not
-    overwhelmed, especially during parallel batch scraping. The optional disk
-    cache stores raw HTML keyed by URL so repeated runs skip live requests.
+    Extends BaseScraper with BeautifulSoup parsing and bdlaws-specific
+    headers. All rate limiting, caching, retry, and thread safety come
+    from BaseScraper.
     """
 
-    def __init__(self, delay: float = 0.3, max_retries: int = 4,
-                 timeout: int = 30, cache_dir: Optional[Path] = None,
-                 force_refresh: bool = False) -> None:
+    def __init__(
+        self,
+        delay: float = 0.3,
+        max_retries: int = 4,
+        timeout: int = 30,
+        cache_dir: Optional[Path] = None,
+        force_refresh: bool = False,
+    ) -> None:
         """@param delay         Minimum seconds to wait between HTTP requests.
         @param max_retries     Maximum retry attempts on RequestException.
         @param timeout         Per-request socket timeout in seconds.
         @param cache_dir       Directory for raw HTML cache; None disables caching.
         @param force_refresh   Ignore cache hits and always fetch live.
         """
-        self.delay = delay
-        self.timeout = timeout
-        self.cache_dir = cache_dir
-        self.force_refresh = force_refresh
-        self._last_request = 0.0
-        self._rate_lock = threading.Lock()
-        self.session = requests.Session()
-        self.session.headers.update(HEADERS)
-        if cache_dir:
-            cache_dir.mkdir(parents=True, exist_ok=True)
-        self._fetch_raw = retry(
-            retry=retry_if_exception_type(requests.RequestException),
-            stop=stop_after_attempt(max_retries),
-            wait=wait_exponential(multiplier=1, min=2, max=30),
-            before_sleep=before_sleep_log(logging.getLogger("bdlaw"), logging.WARNING),
-            reraise=True,
-        )(self._fetch_raw_inner)
+        super().__init__(
+            delay=delay,
+            max_retries=max_retries,
+            timeout=timeout,
+            cache_dir=cache_dir,
+            force_refresh=force_refresh,
+            logger_name="bdlaw",
+            headers=HEADERS,
+        )
 
-    def _fetch_raw_inner(self, url: str) -> str:
-        """Perform a single throttled GET request and return the response body.
-
-        Rate limiting is protected by _rate_lock so concurrent callers on the
-        same Scraper instance serialize their delay checks.
-
-        @param url  Absolute URL to fetch.
-        @return     Response body as a string.
-        @raises requests.HTTPError  On 4xx/5xx responses.
-        """
-        with self._rate_lock:
-            elapsed = time.monotonic() - self._last_request
-            if elapsed < self.delay:
-                time.sleep(self.delay - elapsed)
-            self._last_request = time.monotonic()
-        resp = self.session.get(url, timeout=self.timeout)
-        resp.raise_for_status()
-        return resp.text
-
-    def fetch(self, url: str) -> BeautifulSoup:
+    def fetch(self, url: str) -> BeautifulSoup:  # type: ignore[override]
         """Fetch a URL and return a parsed BeautifulSoup tree.
-
-        Reads from the disk cache if available; otherwise fetches live and
-        writes the result to the cache.
 
         @param url  Absolute URL to fetch.
         @return     Parsed HTML tree.
         """
-        if self.cache_dir:
-            cache_key = re.sub(r"[^\w]", "_", url) + ".html"
-            cache_file = self.cache_dir / cache_key
-            if cache_file.exists() and not self.force_refresh:
-                logging.getLogger("bdlaw").debug("Cache hit: %s", url)
-                return BeautifulSoup(cache_file.read_text(encoding="utf-8"), "lxml")
+        cached = self._read_cache(url)
+        if cached is not None:
+            logging.getLogger("bdlaw").debug("Cache hit: %s", url)
+            return BeautifulSoup(cached, "lxml")
         html = self._fetch_raw(url)
-        if self.cache_dir:
-            cache_file.write_text(html, encoding="utf-8")  # type: ignore[possibly-undefined]
+        self._write_cache(url, html)
         return BeautifulSoup(html, "lxml")
 
 
@@ -481,14 +753,14 @@ def _tag_to_md_text(node: object, scraper: Optional[Scraper] = None) -> str:
     if node.name == "a":
         href: str = node.get("href", "")  # type: ignore[union-attr]
         inner = "".join(_tag_to_md_text(c, scraper) for c in node.children)  # type: ignore[union-attr]
-        text  = " ".join(inner.split())
+        text = " ".join(inner.split())
         if not text:
             return ""
         if href:
             full_href = href if href.startswith("http") else urljoin(BASE_URL, href)
             m = _RE_BDLAWS_ACT.match(full_href)
             if m:
-                clean_text = re.sub(r'[\].]+$', '', text).strip()
+                clean_text = re.sub(r"[\].]+$", "", text).strip()
                 return f"[[act-{m.group(1)}\\|{clean_text}]]"
             if re.fullmatch(r"\d+", text):
                 return f"[{text}]"
@@ -546,7 +818,8 @@ def extract_section_number(raw_text: str) -> Optional[str]:
     @return          Normalised section number string, or None if not detected.
     """
     cleaned = "\n".join(
-        line for line in raw_text.splitlines()
+        line
+        for line in raw_text.splitlines()
         if not re.fullmatch(r"\s*[\d\u09E6-\u09EF]+\s*", line)
     )
     cleaned = re.sub(r"\[\d+\]", "", cleaned)
@@ -554,8 +827,12 @@ def extract_section_number(raw_text: str) -> Optional[str]:
     if stripped.startswith("[") and stripped.endswith("]"):
         stripped = stripped[1:-1].lstrip()
     for pat in (
-        RE_BN_SECTION_NUM_BRACKET, RE_BN_SECTION_NUM_PLAIN, RE_BN_SECTION_NUM_CLAUSE,
-        RE_SECTION_NUM_BRACKET, RE_SECTION_NUM_PLAIN, RE_SECTION_NUM_CLAUSE,
+        RE_BN_SECTION_NUM_BRACKET,
+        RE_BN_SECTION_NUM_PLAIN,
+        RE_BN_SECTION_NUM_CLAUSE,
+        RE_SECTION_NUM_BRACKET,
+        RE_SECTION_NUM_PLAIN,
+        RE_SECTION_NUM_CLAUSE,
     ):
         m = pat.match(stripped)
         if m:
@@ -590,7 +867,7 @@ def parse_footnotes(soup: BeautifulSoup) -> Optional[FootnotesItem]:
             if hasattr(node, "name") and node.name == "h6":
                 continue
             parts.append(_tag_to_md_text(node))
-        text = _normalise(re.sub(r'[\xa0​\s]+', ' ', "".join(parts)).strip())
+        text = _normalise(re.sub(r"[\xa0​\s]+", " ", "".join(parts)).strip())
         if text:
             notes.append((num, text))
     return FootnotesItem(notes=notes) if notes else None
@@ -616,18 +893,20 @@ def parse_act_date(soup: BeautifulSoup) -> Optional[str]:
         month_num = _BN_MONTH_MAP.get(m.group(2).strip(","))
         if month_num:
             try:
-                day  = int(m.group(1).translate(BENGALI_DIGIT_MAP))
+                day = int(m.group(1).translate(BENGALI_DIGIT_MAP))
                 year = int(m.group(3).translate(BENGALI_DIGIT_MAP))
                 return f"{year:04d}-{month_num:02d}-{day:02d}"
             except ValueError:
                 pass
     # English: "11th September, 1836"
-    m = re.match(r"(\d+)(?:st|nd|rd|th)?\s+(\w+?)(?:,\s*|\s+)(\d+)\s*$", raw, re.IGNORECASE)
+    m = re.match(
+        r"(\d+)(?:st|nd|rd|th)?\s+(\w+?)(?:,\s*|\s+)(\d+)\s*$", raw, re.IGNORECASE
+    )
     if m:
         month_num = _EN_MONTH_MAP.get(m.group(2).lower())
         if month_num:
             try:
-                day  = int(m.group(1))
+                day = int(m.group(1))
                 year = int(m.group(3))
                 return f"{year:04d}-{month_num:02d}-{day:02d}"
             except ValueError:
@@ -650,19 +929,19 @@ def _parse_date_from_preamble_text(text: str) -> Optional[str]:
     @return      ISO 8601 date string (YYYY-MM-DD), or None if not found.
     """
     patterns = [
-        r'corresponding\s+to\s+the\s+([\w-]+)\s+day\s+of\s+(\w+),?\s+(\d{4})',
-        r'\bthe\s+([\w-]+)\s+day\s+of\s+(\w+),?\s+(\d{4})\s+A\.?D\.?',
-        r'\bthe\s+([\w-]+)\s+day\s+of\s+(\w+),?\s+(\d{4})',
+        r"corresponding\s+to\s+the\s+([\w-]+)\s+day\s+of\s+(\w+),?\s+(\d{4})",
+        r"\bthe\s+([\w-]+)\s+day\s+of\s+(\w+),?\s+(\d{4})\s+A\.?D\.?",
+        r"\bthe\s+([\w-]+)\s+day\s+of\s+(\w+),?\s+(\d{4})",
     ]
     for pat in patterns:
         for m in re.finditer(pat, text, re.IGNORECASE):
-            day_raw   = m.group(1).lower()
+            day_raw = m.group(1).lower()
             month_num = _EN_MONTH_MAP.get(m.group(2).lower())
             if not month_num:
                 continue
             day = _ORDINAL_WORDS.get(day_raw)
             if day is None:
-                nm = re.match(r'(\d+)(?:st|nd|rd|th)?$', day_raw)
+                nm = re.match(r"(\d+)(?:st|nd|rd|th)?$", day_raw)
                 if nm:
                     day = int(nm.group(1))
             if day and 1 <= day <= 31:
@@ -715,7 +994,9 @@ def parse_toc(soup: BeautifulSoup, base: str) -> dict[str, str]:
     for p in container.find_all("p", class_="act-section-name"):
         a = p.find("a")
         if a and a.get("href"):
-            heading = _normalise(" ".join(a.get_text(separator=" ", strip=True).split()))
+            heading = _normalise(
+                " ".join(a.get_text(separator=" ", strip=True).split())
+            )
             section_map[heading] = urljoin(base, a["href"])
     return section_map
 
@@ -804,7 +1085,9 @@ def parse_preamble(soup: BeautifulSoup) -> str:
     raw = re.sub(r"\[\d+\]|\[\*+\s*\*+\]|\^\S+\^", "", raw)
     raw = re.sub(r"[^\S\n]+", " ", raw)
     raw = "\n".join(l.strip() for l in raw.splitlines())
-    raw = "\n".join(l for l in raw.splitlines() if l and not re.fullmatch(r"[\d\u09E6-\u09EF]+", l))
+    raw = "\n".join(
+        l for l in raw.splitlines() if l and not re.fullmatch(r"[\d\u09E6-\u09EF]+", l)
+    )
     for marker in ("\nCONTENTS", "\nSECTIONS"):
         idx = raw.find(marker)
         if idx != -1:
@@ -864,33 +1147,42 @@ def parse_detail(soup: BeautifulSoup, base: str) -> Generator[DocNode, None, Non
             no_p = part_group.find("p", class_="act-part-no")
             link = no_p.find("a") if no_p else part_group.find("a")
             if link and link.get("href"):
-                part_num  = _normalise(link.get_text(strip=True))
-                part_url  = urljoin(base, link["href"])
-                name_p    = part_group.find("p", class_="act-part-name")
-                subtitle  = _normalise(name_p.get_text(strip=True)) if name_p else ""
+                part_num = _normalise(link.get_text(strip=True))
+                part_url = urljoin(base, link["href"])
+                name_p = part_group.find("p", class_="act-part-name")
+                subtitle = _normalise(name_p.get_text(strip=True)) if name_p else ""
                 full_name = f"{part_num}: {subtitle}" if subtitle else part_num
                 yield PartItem(name=full_name, url=part_url)
 
         chapter_group = row.find("div", class_="act-chapter-group")
         if chapter_group:
-            chap_no_p   = row.find("p", class_="act-chapter-no")
+            chap_no_p = row.find("p", class_="act-chapter-no")
             chap_name_p = row.find("p", class_="act-chapter-name")
             if chap_no_p:
-                chap_no   = _normalise(chap_no_p.get_text(strip=True))
-                chap_name = _normalise(chap_name_p.get_text(strip=True)) if chap_name_p else ""
+                chap_no = _normalise(chap_no_p.get_text(strip=True))
+                chap_name = (
+                    _normalise(chap_name_p.get_text(strip=True)) if chap_name_p else ""
+                )
                 full_chap = f"{chap_no}: {chap_name}" if chap_name else chap_no
                 yield ChapterItem(name=full_chap)
 
         for sec_head in row.find_all("p", class_="act-section-head"):
-            raw = _normalise(" ".join(sec_head.get_text(separator=" ", strip=True).split()))
+            raw = _normalise(
+                " ".join(sec_head.get_text(separator=" ", strip=True).split())
+            )
             m = RE_SUBCHAPTER_HEAD.match(raw)
             if m:
-                yield SubChapterItem(letter=m.group(1), subtitle=m.group(2).strip(),
-                                     parent_number=last_section_num)
+                yield SubChapterItem(
+                    letter=m.group(1),
+                    subtitle=m.group(2).strip(),
+                    parent_number=last_section_num,
+                )
             elif raw:
-                yield SubChapterItem(letter="", subtitle=raw, parent_number=last_section_num)
+                yield SubChapterItem(
+                    letter="", subtitle=raw, parent_number=last_section_num
+                )
 
-        head_div    = row.find("div", class_="txt-head")
+        head_div = row.find("div", class_="txt-head")
         details_div = row.find("div", class_="txt-details")
         if details_div:
             if head_div:
@@ -901,14 +1193,18 @@ def parse_detail(soup: BeautifulSoup, base: str) -> Generator[DocNode, None, Non
             else:
                 heading = ""
             raw_text = _get_text(details_div)
-            number   = extract_section_number(raw_text)
+            number = extract_section_number(raw_text)
             if number:
                 last_section_num = number
             if not _is_boilerplate(raw_text):
-                yield SectionItem(heading=heading, url="#", html=details_div, number=number)
+                yield SectionItem(
+                    heading=heading, url="#", html=details_div, number=number
+                )
 
 
-def resolve_urls(nodes: list[DocNode], toc_map: dict[str, str], base: str) -> list[DocNode]:
+def resolve_urls(
+    nodes: list[DocNode], toc_map: dict[str, str], base: str
+) -> list[DocNode]:
     """Resolve "#" placeholder URLs in SectionItems using the ToC heading map.
 
     First tries an exact case-insensitive match; if that fails, tries substring
@@ -954,8 +1250,8 @@ def _transform_footnotes(text: str) -> str:
     return text
 
 
-_RE_OMISSION_MARKER = re.compile(r'\[\^(\d+)\]\s*\[\s*\*\s*\*\s*\*\s*\]')
-_RE_OMITTED_TERM    = re.compile(
+_RE_OMISSION_MARKER = re.compile(r"\[\^(\d+)\]\s*\[\s*\*\s*\*\s*\*\s*\]")
+_RE_OMITTED_TERM = re.compile(
     r'[Tt]he words?\s+[“"]([^”"]+)[”"]\s+(?:was|were)\s+omitted',
     re.IGNORECASE,
 )
@@ -972,17 +1268,19 @@ def _resolve_omissions(text: str, footnote_map: dict) -> str:
     @param footnote_map  Dict of footnote_number → footnote_text.
     @return              Text with omission markers resolved.
     """
+
     def replace(m: re.Match) -> str:
-        num  = int(m.group(1))
+        num = int(m.group(1))
         note = footnote_map.get(num, "")
         term = _RE_OMITTED_TERM.search(note)
         if term:
             return f'[^{num}][~~"{term.group(1)}"~~ omitted]'
         return f"[^{num}][omitted]"
+
     return _RE_OMISSION_MARKER.sub(replace, text)
 
 
-_RE_LEADING_FN = re.compile(r'^(\[\^\d+\])\s*(?!\[)(?!:)', re.MULTILINE)
+_RE_LEADING_FN = re.compile(r"^(\[\^\d+\])\s*(?!\[)(?!:)", re.MULTILINE)
 
 
 def _relocate_leading_footnotes(text: str) -> str:
@@ -1003,10 +1301,14 @@ def _relocate_leading_footnotes(text: str) -> str:
         m = _RE_LEADING_FN.match(lines[i])
         if m:
             fn_marker = m.group(1)
-            rest      = lines[i][m.end():]
+            rest = lines[i][m.end() :]
             para = [rest] if rest.strip() else []
             i += 1
-            while i < len(lines) and lines[i].strip() and not _is_block_break(lines[i].strip()):
+            while (
+                i < len(lines)
+                and lines[i].strip()
+                and not _is_block_break(lines[i].strip())
+            ):
                 para.append(lines[i])
                 i += 1
             if para:
@@ -1069,25 +1371,25 @@ def _strip_leading_section_num(text: str) -> str:
     m_fn = _RE_FN_PREFIX.match(stripped)
     if m_fn:
         fn_prefix = m_fn.group(1)
-        stripped  = stripped[m_fn.end():].lstrip()
+        stripped = stripped[m_fn.end() :].lstrip()
     stripped = re.sub(r"^[.\s]+", "", stripped)
 
     def _try_strip(s: str) -> Optional[str]:
         for pat in (RE_BN_SECTION_NUM_BRACKET, RE_BN_SECTION_NUM_PLAIN):
             m = pat.match(s)
             if m:
-                return s[m.end():]
+                return s[m.end() :]
         m = RE_BN_SECTION_NUM_CLAUSE.match(s)
         if m:
             dot_pos = next(i for i, c in enumerate(s) if c in _BN_DANDA)
-            return s[dot_pos + 1:]
+            return s[dot_pos + 1 :]
         for pat in (RE_SECTION_NUM_BRACKET, RE_SECTION_NUM_PLAIN):
             m = pat.match(s)
             if m:
-                return s[m.end():]
+                return s[m.end() :]
         m = RE_SECTION_NUM_CLAUSE.match(s)
         if m:
-            return s[s.index(".") + 1:]
+            return s[s.index(".") + 1 :]
         return None
 
     result = _try_strip(stripped)
@@ -1111,8 +1413,10 @@ def _strip_outer_brackets(text: str) -> str:
         return text
     depth = 0
     for i, ch in enumerate(text):
-        if ch == "[":   depth += 1
-        elif ch == "]": depth -= 1
+        if ch == "[":
+            depth += 1
+        elif ch == "]":
+            depth -= 1
         if depth == 0:
             if i == len(text) - 1:
                 return text[1:-1].strip()
@@ -1156,11 +1460,15 @@ def _is_block_break(s: str) -> bool:
     @return   True if the line starts a new block.
     """
     return bool(
-        s.startswith("**") or s.startswith(">") or s.startswith("#")
+        s.startswith("**")
+        or s.startswith(">")
+        or s.startswith("#")
         or _classify_item(s) is not None
         or _RE_ORDINAL_ITEM.match(s)
-        or _RE_EXPL_NUMBERED.match(s) or _RE_EXPL_SINGLE.match(s)
-        or _RE_EXCEP_NUMBERED.match(s) or _RE_EXCEP_SINGLE.match(s)
+        or _RE_EXPL_NUMBERED.match(s)
+        or _RE_EXPL_SINGLE.match(s)
+        or _RE_EXCEP_NUMBERED.match(s)
+        or _RE_EXCEP_SINGLE.match(s)
         or _RE_ILLUSTRATIONS.match(s)
         or _RE_PROVIDED_STANDALONE.match(s)
         or any(p.match(s) for p, _, _ in _MARGIN_CALLOUTS)
@@ -1186,7 +1494,11 @@ def _join_fragment_lines(text: str) -> str:
             i += 1
             while i < len(lines) and not lines[i].strip():
                 i += 1
-            if i < len(lines) and lines[i].strip() and not _is_block_break(lines[i].strip()):
+            if (
+                i < len(lines)
+                and lines[i].strip()
+                and not _is_block_break(lines[i].strip())
+            ):
                 out[-1] = out[-1].rstrip() + " " + lines[i].strip()
                 i += 1
         else:
@@ -1209,9 +1521,12 @@ def _strip_unmatched_open_brackets(text: str) -> str:
     for line in lines:
         s = line.lstrip()
         if (
-            s.startswith("[") and not s.startswith("[^")
-            and not s.startswith("[ *") and not s.startswith("[[")
-            and "]]" not in s and "]" not in s
+            s.startswith("[")
+            and not s.startswith("[^")
+            and not s.startswith("[ *")
+            and not s.startswith("[[")
+            and "]]" not in s
+            and "]" not in s
         ):
             out.append(s[1:])
         else:
@@ -1244,13 +1559,17 @@ def _classify_item(line: str) -> Optional[str]:
                  "bn_vowel", or None.
     """
     s = line.strip()
-    s = re.sub(r'^(\[\^\d+\]\s*)+', '', s)
+    s = re.sub(r"^(\[\^\d+\]\s*)+", "", s)
     if s.startswith("[") and not s.startswith("[[") and not s.startswith("[^"):
         s = s[1:]
-    if RE_BN_DECIMAL_ITEM.match(s): return "bn_decimal"
-    if RE_BN_ALPHA_ITEM.match(s):   return "bn_alpha"
-    if RE_BN_VOWEL_ITEM.match(s):   return "bn_vowel"
-    if RE_DECIMAL_ITEM.match(s):    return "decimal"
+    if RE_BN_DECIMAL_ITEM.match(s):
+        return "bn_decimal"
+    if RE_BN_ALPHA_ITEM.match(s):
+        return "bn_alpha"
+    if RE_BN_VOWEL_ITEM.match(s):
+        return "bn_vowel"
+    if RE_DECIMAL_ITEM.match(s):
+        return "decimal"
     m_roman = RE_ROMAN_ITEM.match(s)
     if m_roman and len(m_roman.group(1)) > 1:
         return "roman"
@@ -1258,6 +1577,46 @@ def _classify_item(line: str) -> Optional[str]:
     if m_alpha:
         return "roman" if m_alpha.group(1).lower() == "i" else "alpha"
     return None
+
+
+def _item_marker(line: str) -> str:
+    """Return the original list marker of an item line, e.g. "(a)", "(১)", "(ক)", "(iv)".
+
+    The Markdown output renumbers every list as 1. 2. 3., which loses the
+    legal numbering. The marker is returned so it can be kept beside the
+    item (see convert_lists) and rebuilt faithfully when rendering to HTML.
+
+    @param line  A line classified as a list item by _classify_item.
+    @return      The marker including its parentheses, or "" when none matches.
+    """
+    s = re.sub(r"^(\[\^\d+\]\s*)+", "", line.strip())
+    if s.startswith("[") and not s.startswith("[[") and not s.startswith("[^"):
+        s = s[1:]
+    for pat in (
+        RE_ALPHA_ITEM,
+        RE_ROMAN_ITEM,
+        RE_DECIMAL_ITEM,
+        RE_BN_ALPHA_ITEM,
+        RE_BN_DECIMAL_ITEM,
+        RE_BN_VOWEL_ITEM,
+    ):
+        m = pat.match(s)
+        if m:
+            return f"({m.group(1)})"
+    return ""
+
+
+# Collected per act while building Markdown: one record per list item whose marker
+# was replaced by a counter. scrape_act writes it next to the act as numbering JSON.
+_NUMBERING = threading.local()
+
+
+def _record_numbering(marker: str, rendered: int, depth: int, kind: str) -> None:
+    items = getattr(_NUMBERING, "items", None)
+    if items is not None:
+        items.append(
+            {"n": len(items) + 1, "marker": marker, "rendered": f"{rendered}.", "depth": depth, "type": kind}
+        )
 
 
 def _extract_item_content(line: str) -> str:
@@ -1269,17 +1628,21 @@ def _extract_item_content(line: str) -> str:
     s = line.strip()
     fn_prefix = ""
     while True:
-        fn_m = re.match(r'^(\[\^\d+\])\s*', s)
+        fn_m = re.match(r"^(\[\^\d+\])\s*", s)
         if fn_m:
             fn_prefix += fn_m.group(1) + " "
-            s = s[fn_m.end():]
+            s = s[fn_m.end() :]
         else:
             break
     if s.startswith("[") and not s.startswith("[[") and not s.startswith("[^"):
         s = s[1:]
     for pat in (
-        RE_ALPHA_ITEM, RE_ROMAN_ITEM, RE_DECIMAL_ITEM,
-        RE_BN_ALPHA_ITEM, RE_BN_DECIMAL_ITEM, RE_BN_VOWEL_ITEM,
+        RE_ALPHA_ITEM,
+        RE_ROMAN_ITEM,
+        RE_DECIMAL_ITEM,
+        RE_BN_ALPHA_ITEM,
+        RE_BN_DECIMAL_ITEM,
+        RE_BN_VOWEL_ITEM,
     ):
         m = pat.match(s)
         if m:
@@ -1288,7 +1651,7 @@ def _extract_item_content(line: str) -> str:
 
 
 _RE_INLINE_ITEM_SEP = re.compile(
-    r'\s*[;,]\s+(?:(?:and|or)\s+)?\(([a-zA-Z]|\d+)\)(?=\s)',
+    r"\s*[;,]\s+(?:(?:and|or)\s+)?\(([a-zA-Z]|\d+)\)(?=\s)",
 )
 
 
@@ -1298,7 +1661,7 @@ def _split_inline_list_items(text: str) -> str:
     Handles patterns where list items are written inline separated by semicolons
     or commas, e.g. '...unsound mind ; (d) is or is deemed... ; and (e) has not...'
     """
-    return _RE_INLINE_ITEM_SEP.sub(lambda m: f'\n({m.group(1)})', text)
+    return _RE_INLINE_ITEM_SEP.sub(lambda m: f"\n({m.group(1)})", text)
 
 
 def _join_sentence_continuations(text: str) -> str:
@@ -1317,14 +1680,12 @@ def _join_sentence_continuations(text: str) -> str:
         out.append(lines[i])
         stripped = lines[i].strip()
 
-        if (not stripped
-                or _classify_item(stripped)
-                or _is_block_break(stripped)):
+        if not stripped or _classify_item(stripped) or _is_block_break(stripped):
             i += 1
             continue
 
-        lw = re.search(r'\b(\w+)\W*$', stripped)
-        lw_str = lw.group(1).lower() if lw else ''
+        lw = re.search(r"\b(\w+)\W*$", stripped)
+        lw_str = lw.group(1).lower() if lw else ""
         if lw_str not in _CANNOT_END_SENTENCE_WORDS:
             i += 1
             continue
@@ -1339,7 +1700,7 @@ def _join_sentence_continuations(text: str) -> str:
 
         ns = lines[j].strip()
         if ns and not _classify_item(ns) and not _is_block_break(ns):
-            out[-1] = out[-1].rstrip() + ' ' + ns
+            out[-1] = out[-1].rstrip() + " " + ns
             i = j + 1
         else:
             i += 1
@@ -1380,13 +1741,13 @@ def convert_lists(text: str) -> str:
     effective_depth = dict(_LIST_DEPTH)
     if first_lt == "bn_decimal":
         effective_depth["bn_decimal"] = 1
-        effective_depth["bn_alpha"]   = 2
+        effective_depth["bn_alpha"] = 2
     elif first_lt == "bn_alpha":
-        effective_depth["bn_alpha"]   = 1
+        effective_depth["bn_alpha"] = 1
         effective_depth["bn_decimal"] = 2
     elif first_lt == "decimal":
         effective_depth["decimal"] = 1
-        effective_depth["alpha"]   = 2
+        effective_depth["alpha"] = 2
 
     while i < n:
         lt = _classify_item(lines[i])
@@ -1406,8 +1767,8 @@ def convert_lists(text: str) -> str:
             continue
 
         depth = effective_depth.get(lt, 1)
-        pad   = " " * (_LIST_INDENT * (depth - 1))
-        cpad  = " " * (_LIST_INDENT * depth)
+        pad = " " * (_LIST_INDENT * (depth - 1))
+        cpad = " " * (_LIST_INDENT * depth)
 
         for d in list(counts.keys()):
             if d > depth:
@@ -1417,6 +1778,8 @@ def convert_lists(text: str) -> str:
         idx = counts[depth]
 
         first = _extract_item_content(lines[i])
+        marker = _item_marker(lines[i])
+        _record_numbering(marker, idx, depth, lt)
         i += 1
 
         continuation: list[str] = []
@@ -1429,14 +1792,13 @@ def convert_lists(text: str) -> str:
                 break
             if curr_s:
                 last_c = next((c for c in reversed(continuation) if c), first)
-                lw = re.search(r'\b(\w+)\W*$', last_c.rstrip())
-                lw_str = lw.group(1).lower() if lw else ''
-                if (lw_str in _CANNOT_END_SENTENCE_WORDS
-                        and not _classify_item(curr_s)):
+                lw = re.search(r"\b(\w+)\W*$", last_c.rstrip())
+                lw_str = lw.group(1).lower() if lw else ""
+                if lw_str in _CANNOT_END_SENTENCE_WORDS and not _classify_item(curr_s):
                     if continuation and continuation[-1]:
-                        continuation[-1] = continuation[-1].rstrip() + ' ' + curr_s
+                        continuation[-1] = continuation[-1].rstrip() + " " + curr_s
                     else:
-                        first = first.rstrip() + ' ' + curr_s
+                        first = first.rstrip() + " " + curr_s
                 else:
                     continuation.append(curr_s)
                 i += 1
@@ -1449,8 +1811,8 @@ def convert_lists(text: str) -> str:
                     break
                 elif ns and not _is_block_break(ns):
                     last_c = next((c for c in reversed(continuation) if c), first)
-                    lw = re.search(r'\b(\w+)\W*$', last_c.rstrip())
-                    lw_str = lw.group(1).lower() if lw else ''
+                    lw = re.search(r"\b(\w+)\W*$", last_c.rstrip())
+                    lw_str = lw.group(1).lower() if lw else ""
                     if lw_str in _CANNOT_END_SENTENCE_WORDS:
                         i = j
                     else:
@@ -1462,8 +1824,11 @@ def convert_lists(text: str) -> str:
         full_item = first
         for cont_line in continuation:
             if cont_line:
-                full_item = full_item.rstrip() + ' ' + cont_line
-        out.append(f"{pad}{idx}. {full_item}")
+                full_item = full_item.rstrip() + " " + cont_line
+        # <!--n:(a)--> keeps the original marker. It is invisible in Obsidian and in any
+        # Markdown renderer, and md2html uses it to show (a) instead of 1.
+        tag = f"<!--n:{marker}--> " if marker else ""
+        out.append(f"{pad}{idx}. {tag}{full_item}")
         last_was_list = True
 
     return "\n".join(out)
@@ -1490,10 +1855,14 @@ def _convert_provided(text: str) -> str:
         else:
             m = _RE_ORDINAL_ITEM.match(stripped)
             if m:
-                ordinal  = m.group(1).capitalize()
-                content  = m.group(2).strip()
+                ordinal = m.group(1).capitalize()
+                content = m.group(2).strip()
                 i += 1
-                while i < len(lines) and lines[i].strip() and not _is_block_break(lines[i].strip()):
+                while (
+                    i < len(lines)
+                    and lines[i].strip()
+                    and not _is_block_break(lines[i].strip())
+                ):
                     content += " " + lines[i].strip()
                     i += 1
                 out.append(f"\n**{ordinal}**: {content}\n")
@@ -1526,7 +1895,7 @@ def _convert_numbered_callout(
     while i < len(lines):
         raw_line = lines[i].strip()
         fn_m = _RE_FN_PREFIX.match(raw_line)
-        check_line = raw_line[fn_m.end():].lstrip() if fn_m else raw_line
+        check_line = raw_line[fn_m.end() :].lstrip() if fn_m else raw_line
         if not re_numbered.match(check_line):
             out.append(lines[i])
             i += 1
@@ -1536,13 +1905,17 @@ def _convert_numbered_callout(
         while i < len(lines):
             raw_l = lines[i].strip()
             fn_m2 = _RE_FN_PREFIX.match(raw_l)
-            chk   = raw_l[fn_m2.end():].lstrip() if fn_m2 else raw_l
-            m2    = re_numbered.match(chk)
+            chk = raw_l[fn_m2.end() :].lstrip() if fn_m2 else raw_l
+            m2 = re_numbered.match(chk)
             if m2:
-                pfx     = (fn_m2.group(1) + " ") if fn_m2 else ""
+                pfx = (fn_m2.group(1) + " ") if fn_m2 else ""
                 content = pfx + m2.group(2).strip()
                 i += 1
-                while i < len(lines) and lines[i].strip() and not _is_block_break(lines[i].strip()):
+                while (
+                    i < len(lines)
+                    and lines[i].strip()
+                    and not _is_block_break(lines[i].strip())
+                ):
                     content += " " + lines[i].strip()
                     i += 1
                 items.append(content)
@@ -1552,8 +1925,8 @@ def _convert_numbered_callout(
                 while j < len(lines) and not lines[j].strip():
                     j += 1
                 chk_j = lines[j].strip() if j < len(lines) else ""
-                fn_j  = _RE_FN_PREFIX.match(chk_j)
-                chk_j = chk_j[fn_j.end():].lstrip() if fn_j else chk_j
+                fn_j = _RE_FN_PREFIX.match(chk_j)
+                chk_j = chk_j[fn_j.end() :].lstrip() if fn_j else chk_j
                 if j < len(lines) and re_numbered.match(chk_j):
                     continue
                 break
@@ -1593,13 +1966,17 @@ def _convert_single_callout(
     while i < len(lines):
         raw_line = lines[i].strip()
         fn_m = _RE_FN_PREFIX.match(raw_line)
-        check_line = raw_line[fn_m.end():].lstrip() if fn_m else raw_line
+        check_line = raw_line[fn_m.end() :].lstrip() if fn_m else raw_line
         m = re_single.match(check_line)
         if m:
             fn_prefix = (fn_m.group(1) + " ") if fn_m else ""
-            content   = fn_prefix + m.group(1).strip()
+            content = fn_prefix + m.group(1).strip()
             i += 1
-            while i < len(lines) and lines[i].strip() and not _is_block_break(lines[i].strip()):
+            while (
+                i < len(lines)
+                and lines[i].strip()
+                and not _is_block_break(lines[i].strip())
+            ):
                 content += " " + lines[i].strip()
                 i += 1
             out.append(f"> [!{callout_name}]")
@@ -1628,7 +2005,11 @@ def _wrap_illustrations_callout(text: str) -> str:
         while i < len(lines) and not lines[i].strip():
             i += 1
         out.append("> [!Illustrations]")
-        while i < len(lines) and lines[i].strip() and not _is_block_break(lines[i].strip()):
+        while (
+            i < len(lines)
+            and lines[i].strip()
+            and not _is_block_break(lines[i].strip())
+        ):
             out.append(f"> {lines[i].strip()}")
             i += 1
     return "\n".join(out)
@@ -1646,8 +2027,8 @@ def _nest_secondary_callouts(text: str) -> str:
     @return      Text with nested secondary callouts indented.
     """
     lines = text.splitlines()
-    out   = []
-    i     = 0
+    out = []
+    i = 0
     while i < len(lines):
         if _RE_NEST_EXPL_START.match(lines[i]):
             out.append(lines[i])
@@ -1665,7 +2046,7 @@ def _nest_secondary_callouts(text: str) -> str:
                     j = i + 1
                     while j < len(lines) and not lines[j].strip():
                         j += 1
-                    if j < len(lines) and _RE_SECONDARY_HDR.match(lines[j]):
+                    if j < len(lines) and _RE_NEST_SECONDARY_HDR.match(lines[j]):
                         i = j
                         continue
                     out.append(curr)
@@ -1691,8 +2072,8 @@ def _convert_margin_callouts(text: str) -> str:
     @return      Text with margin-note lines replaced by callout blocks.
     """
     lines = text.splitlines()
-    out   = []
-    i     = 0
+    out = []
+    i = 0
     while i < len(lines):
         matched = False
         raw_line = lines[i].strip()
@@ -1701,7 +2082,11 @@ def _convert_margin_callouts(text: str) -> str:
             if m:
                 content = m.group(1).strip()
                 i += 1
-                while i < len(lines) and lines[i].strip() and not _is_block_break(lines[i].strip()):
+                while (
+                    i < len(lines)
+                    and lines[i].strip()
+                    and not _is_block_break(lines[i].strip())
+                ):
                     content += " " + lines[i].strip()
                     i += 1
                 out.append(f"> [!{callout_type}] {label}")
@@ -1725,12 +2110,12 @@ def _convert_definitions(text: str) -> str:
     @return      Text with definition lines wrapped in callout blocks.
     """
     lines = text.splitlines()
-    out   = []
+    out = []
     for line in lines:
         m = _RE_DEFINITION.match(line.strip())
         if m:
-            term    = m.group(1).strip()
-            verb    = m.group(2)
+            term = m.group(1).strip()
+            verb = m.group(2)
             content = m.group(3).strip()
             out.append("> [!Definition]")
             out.append(f"> **{term}** {verb} {content}")
@@ -1754,12 +2139,14 @@ def _mark_omitted_repealed(text: str) -> str:
     @param text  Section text.
     @return      Text with omission/repeal notices struck through.
     """
-    text = _RE_OMITTED_INLINE.sub(r"~~\1~~",  text)
+    text = _RE_OMITTED_INLINE.sub(r"~~\1~~", text)
     text = _RE_REPEALED_INLINE.sub(r"~~\1~~", text)
     return text
 
 
-def _linkify_section_refs(text: str, act_number: str, known_sections: set = frozenset()) -> str:
+def _linkify_section_refs(
+    text: str, act_number: str, known_sections: set = frozenset()
+) -> str:
     """Convert bare "section N" references to [[wikilinks]] pointing to block anchors.
 
     Only linkifies references to sections that exist in known_sections (built
@@ -1776,20 +2163,20 @@ def _linkify_section_refs(text: str, act_number: str, known_sections: set = froz
 
     def replace_sec(m: re.Match) -> str:
         prefix = m.group(1)
-        num    = m.group(2)
+        num = m.group(2)
         anchor = _secnum_to_block_id(num)
         if anchor not in known_sections:
             return m.group(0)
         return f"[[act-{act_number}#^sec-{anchor}\\|{prefix} {num}]]"
 
     result = []
-    last   = 0
+    last = 0
     for m in _RE_SECTION_REF.finditer(text):
-        before = text[max(0, m.start()-10):m.start()]
+        before = text[max(0, m.start() - 10) : m.start()]
         if "[[" in before and "]]" not in before:
-            result.append(text[last:m.end()])
+            result.append(text[last : m.end()])
         else:
-            result.append(text[last:m.start()])
+            result.append(text[last : m.start()])
             result.append(replace_sec(m))
         last = m.end()
     result.append(text[last:])
@@ -1892,8 +2279,11 @@ def _is_boilerplate(raw: str) -> bool:
     if not lines:
         return True
     bp = sum(
-        1 for l in lines
-        if _RE_BOILERPLATE_LINE.search(l) or _RE_URL_ONLY.match(l) or _RE_TOC_LINK.match(l)
+        1
+        for l in lines
+        if _RE_BOILERPLATE_LINE.search(l)
+        or _RE_URL_ONLY.match(l)
+        or _RE_TOC_LINK.match(l)
     )
     return bp / len(lines) > 0.6
 
@@ -1915,9 +2305,12 @@ def _filter_stray_lines(text: str) -> str:
             if stripped.strip():
                 kept.append(stripped)
             continue
-        if _RE_URL_ONLY.match(line): continue
-        if _RE_TOC_LINK.match(line): continue
-        if re.match(r"^\s*(CONTENTS|SECTIONS|PREAMBLE)\s*$", line, re.IGNORECASE): continue
+        if _RE_URL_ONLY.match(line):
+            continue
+        if _RE_TOC_LINK.match(line):
+            continue
+        if re.match(r"^\s*(CONTENTS|SECTIONS|PREAMBLE)\s*$", line, re.IGNORECASE):
+            continue
         kept.append(line)
     return "\n".join(kept)
 
@@ -1983,7 +2376,8 @@ def html_to_markdown(
     raw = re.sub(r"[^\S\n]+", " ", raw)
     raw = "\n".join(line.lstrip() for line in raw.splitlines())
     raw = "\n".join(
-        line for line in raw.splitlines()
+        line
+        for line in raw.splitlines()
         if not re.fullmatch(r"\s*[\d\u09E6-\u09EF]+\s*", line)
     )
     raw = _strip_outer_brackets(raw)
@@ -1996,7 +2390,9 @@ def html_to_markdown(
     raw = _filter_stray_lines(raw)
     raw = _RE_SUBST_LETTER.sub(r"\1", raw)
     raw = _strip_annotation_brackets(raw)
-    raw = re.sub(r'(?<=\]\])\.?\](?!\])', lambda m: '.' if '.' in m.group(0) else '', raw)
+    raw = re.sub(
+        r"(?<=\]\])\.?\](?!\])", lambda m: "." if "." in m.group(0) else "", raw
+    )
     raw = _strip_unmatched_open_brackets(raw)
     raw = re.sub(r"^\.\s+(?=\()", "", raw.lstrip())
     raw = _join_isolated_labels(raw)
@@ -2006,10 +2402,18 @@ def html_to_markdown(
     raw = _mark_omitted_repealed(raw)
     raw = _convert_provided(raw)
     raw = _bold_punishment_keywords(raw)
-    raw = _convert_numbered_callout(raw, _RE_EXPL_NUMBERED, _RE_EXPL_SINGLE, "Explanation")
-    raw = _convert_single_callout(raw, _RE_EXPL_SINGLE, _RE_EXPL_NUMBERED, "Explanation")
-    raw = _convert_numbered_callout(raw, _RE_EXCEP_NUMBERED, _RE_EXCEP_SINGLE, "Exception")
-    raw = _convert_single_callout(raw, _RE_EXCEP_SINGLE, _RE_EXCEP_NUMBERED, "Exception")
+    raw = _convert_numbered_callout(
+        raw, _RE_EXPL_NUMBERED, _RE_EXPL_SINGLE, "Explanation"
+    )
+    raw = _convert_single_callout(
+        raw, _RE_EXPL_SINGLE, _RE_EXPL_NUMBERED, "Explanation"
+    )
+    raw = _convert_numbered_callout(
+        raw, _RE_EXCEP_NUMBERED, _RE_EXCEP_SINGLE, "Exception"
+    )
+    raw = _convert_single_callout(
+        raw, _RE_EXCEP_SINGLE, _RE_EXCEP_NUMBERED, "Exception"
+    )
     raw = _convert_margin_callouts(raw)
     raw = _convert_definitions(raw)
     raw = convert_lists(raw)
@@ -2089,21 +2493,31 @@ def _fix_bengali_ocr(text: str) -> str:
     _BN_C = "কখগঘঙচছজঝঞটঠডঢণতথদধনপফবভমযরলশষসহড়ঢ়য়ৎ"
     text = re.sub(
         r"([" + _BN_C + r"])৪([" + _BN_C + r"])",
-        r"\1ৃ\2", text,
+        r"\1ৃ\2",
+        text,
     )
     text = re.sub(
         r"([" + _BN_C + r"])৷(?=[" + _BN_C + r"\s])",
-        r"\1ি", text,
+        r"\1ি",
+        text,
     )
     return text
 
 
 _TAG_EXCLUSIONS: dict[str, list[str]] = {
-    "Banking&Finance": ["police", "criminal", "penal", "army", "navy", "air force", "intelligence"],
-    "Tax Law":           ["police", "criminal", "penal", "army", "navy", "intelligence"],
-    "Labour Law":        ["police", "criminal", "penal", "intelligence"],
-    "Property Law":      ["police", "criminal", "penal", "intelligence"],
-    "Civil Law":         ["police act", "criminal procedure", "penal"],
+    "Banking&Finance": [
+        "police",
+        "criminal",
+        "penal",
+        "army",
+        "navy",
+        "air force",
+        "intelligence",
+    ],
+    "Tax Law": ["police", "criminal", "penal", "army", "navy", "intelligence"],
+    "Labour Law": ["police", "criminal", "penal", "intelligence"],
+    "Property Law": ["police", "criminal", "penal", "intelligence"],
+    "Civil Law": ["police act", "criminal procedure", "penal"],
 }
 
 
@@ -2121,7 +2535,8 @@ def _infer_tags(act_title: str, nodes: list) -> list[str]:
     """
     tags = ["Legal", "Bangladesh"]
     combined = (
-        act_title.lower() + " "
+        act_title.lower()
+        + " "
         + " ".join(
             n.heading for n in nodes if isinstance(n, SectionItem) and n.heading
         ).lower()[:4000]
@@ -2164,13 +2579,13 @@ def _build_yaml_frontmatter(
     scraped_at = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     tag_lines = "\n".join(f"  - {t}" for t in tags)
     safe_title = act_title.replace('"', '\\"')
-    safe_desc  = description.replace('"', '\\"')
+    safe_desc = description.replace('"', '\\"')
     ascii_title = act_title.translate(BENGALI_DIGIT_MAP)
     year_m = re.search(r"\b(1[6-9]\d{2}|20\d{2})\b", ascii_title)
-    year_line   = f"year: {year_m.group(1)}\n" if year_m else ""
+    year_line = f"year: {year_m.group(1)}\n" if year_m else ""
     act_id_line = f"act_id: {act_number}\n" if act_number else ""
     enacted_line = f"enacted_at: {enacted_at}\n" if enacted_at else ""
-    desc_line    = f'description: "{safe_desc}"\n' if safe_desc else ""
+    desc_line = f'description: "{safe_desc}"\n' if safe_desc else ""
     if section_entries:
         sec_block = "sections:\n" + "".join(
             f"  - id: {e['id']}\n    slug: {e['slug']}\n    url: {e['url']}\n"
@@ -2254,16 +2669,27 @@ def build_markdown(
                     known_sections.add(sec_id)
                     if sec_id not in seen_section_ids:
                         seen_section_ids.add(sec_id)
-                        slug = _heading_to_slug(node.heading or node.number or "", language)
-                        section_entries.append({"id": sec_id, "slug": slug, "url": node.url})
+                        slug = _heading_to_slug(
+                            node.heading or node.number or "", language
+                        )
+                        section_entries.append(
+                            {"id": sec_id, "slug": slug, "url": node.url}
+                        )
 
     lines: list[str] = []
     tags = _infer_tags(act_title, nodes)
-    lines.append(_build_yaml_frontmatter(
-        act_title, act_url, tags,
-        act_number=act_number, language=language, section_entries=section_entries,
-        enacted_at=enacted_at, description=description,
-    ))
+    lines.append(
+        _build_yaml_frontmatter(
+            act_title,
+            act_url,
+            tags,
+            act_number=act_number,
+            language=language,
+            section_entries=section_entries,
+            enacted_at=enacted_at,
+            description=description,
+        )
+    )
 
     if act_title:
         if title_footnote_num is not None:
@@ -2309,7 +2735,9 @@ def build_markdown(
 
         elif isinstance(node, SubChapterItem):
             if node.letter and node.parent_number:
-                heading_text = f"Section {node.parent_number}{node.letter}: {node.subtitle}"
+                heading_text = (
+                    f"Section {node.parent_number}{node.letter}: {node.subtitle}"
+                )
             else:
                 heading_text = node.subtitle
             lines.append("")
@@ -2320,18 +2748,23 @@ def build_markdown(
             has_heading = bool(node.heading) or bool(node.number)
             if has_heading:
                 if node.number:
-                    term         = "ধারা" if language == "bn" else ("Article" if "/Article-" in node.url else "Section")
+                    term = (
+                        "ধারা"
+                        if language == "bn"
+                        else ("Article" if "/Article-" in node.url else "Section")
+                    )
                     heading_text = (
                         f"{term} {node.number}: {node.heading}"
-                        if node.heading else f"{term} {node.number}"
+                        if node.heading
+                        else f"{term} {node.number}"
                     )
                     is_inserted = any(c.isalpha() for c in node.number)
-                    level       = "######" if is_inserted else "#####"
-                    block_id    = f"^sec-{_secnum_to_block_id(node.number)}"
+                    level = "######" if is_inserted else "#####"
+                    block_id = f"^sec-{_secnum_to_block_id(node.number)}"
                 else:
                     heading_text = node.heading
-                    level        = "#####"
-                    block_id     = ""
+                    level = "#####"
+                    block_id = ""
                     if node.url and node.url != "#":
                         sec_id = _url_to_section_id(node.url)
                         if sec_id:
@@ -2344,8 +2777,11 @@ def build_markdown(
                 lines.append("")
 
             body = html_to_markdown(
-                node.html, scraper=scraper, act_number=act_number,
-                known_sections=known_sections, footnote_map=footnote_map,
+                node.html,
+                scraper=scraper,
+                act_number=act_number,
+                known_sections=known_sections,
+                footnote_map=footnote_map,
             )
             if language == "bn":
                 body = _fix_bengali_ocr(body)
@@ -2371,8 +2807,12 @@ def _final_cleanup(md: str) -> str:
 
 
 def scrape_act(
-    act_number: str, output: Path, delay: float,
-    max_retries: int, cache_dir: Optional[Path], log: logging.Logger,
+    act_number: str,
+    output: Path,
+    delay: float,
+    max_retries: int,
+    cache_dir: Optional[Path],
+    log: logging.Logger,
     force_refresh: bool = False,
 ) -> None:
     """Scrape one act and write it as an Obsidian Markdown file.
@@ -2396,16 +2836,20 @@ def scrape_act(
     @param log           Logger instance.
     @param force_refresh Bypass cache and fetch live pages.
     """
-    toc_url    = f"{BASE_URL}/act-{act_number}.html"
+    toc_url = f"{BASE_URL}/act-{act_number}.html"
     detail_url = f"{BASE_URL}/act-print-{act_number}.html"
-    scraper    = Scraper(delay=delay, max_retries=max_retries, cache_dir=cache_dir,
-                        force_refresh=force_refresh)
+    scraper = Scraper(
+        delay=delay,
+        max_retries=max_retries,
+        cache_dir=cache_dir,
+        force_refresh=force_refresh,
+    )
 
     log.info("Fetching act-%s …", act_number)
     with ThreadPoolExecutor(max_workers=2) as ex:
-        fut_toc    = ex.submit(scraper.fetch, toc_url)
+        fut_toc = ex.submit(scraper.fetch, toc_url)
         fut_detail = ex.submit(scraper.fetch, detail_url)
-        toc_soup    = fut_toc.result()
+        toc_soup = fut_toc.result()
         detail_soup = fut_detail.result()
 
     toc_map = parse_toc(toc_soup, BASE_URL)
@@ -2415,8 +2859,12 @@ def scrape_act(
     if _RICH:
         nodes: list[DocNode] = []
         with Progress(
-            SpinnerColumn(), TextColumn("[progress.description]{task.description}"),
-            BarColumn(), MofNCompleteColumn(), TimeElapsedColumn(), console=console,
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            MofNCompleteColumn(),
+            TimeElapsedColumn(),
+            console=console,
         ) as progress:
             task = progress.add_task("Parsing nodes ...", total=None)
             for node in parse_detail(detail_soup, BASE_URL):
@@ -2428,22 +2876,30 @@ def scrape_act(
         nodes = list(parse_detail(detail_soup, BASE_URL))
 
     section_count = sum(1 for n in nodes if isinstance(n, SectionItem))
-    log.info("Parsed %d nodes (%d sections, %d chapters, %d parts)",
-             len(nodes), section_count,
-             sum(1 for n in nodes if isinstance(n, ChapterItem)),
-             sum(1 for n in nodes if isinstance(n, PartItem)))
+    log.info(
+        "Parsed %d nodes (%d sections, %d chapters, %d parts)",
+        len(nodes),
+        section_count,
+        sum(1 for n in nodes if isinstance(n, ChapterItem)),
+        sum(1 for n in nodes if isinstance(n, PartItem)),
+    )
 
     log.info("Resolving section URLs ...")
     resolve_urls(nodes, toc_map, BASE_URL)
 
-    act_title    = parse_act_title(detail_soup) or parse_act_title(toc_soup)
-    title_fn_num = _extract_title_footnote_num(detail_soup) or _extract_title_footnote_num(toc_soup)
-    act_url_str  = f"{BASE_URL}/act-{act_number}.html"
-    enacted_at   = parse_act_date(toc_soup) or parse_act_date(detail_soup)
-    description  = parse_act_description(toc_soup) or parse_act_description(detail_soup)
-    if act_title:    log.info("Act title: %s", act_title)
-    if title_fn_num: log.info("Title footnote: [^%d]", title_fn_num)
-    if enacted_at:   log.info("Enacted at: %s", enacted_at)
+    act_title = parse_act_title(detail_soup) or parse_act_title(toc_soup)
+    title_fn_num = _extract_title_footnote_num(
+        detail_soup
+    ) or _extract_title_footnote_num(toc_soup)
+    act_url_str = f"{BASE_URL}/act-{act_number}.html"
+    enacted_at = parse_act_date(toc_soup) or parse_act_date(detail_soup)
+    description = parse_act_description(toc_soup) or parse_act_description(detail_soup)
+    if act_title:
+        log.info("Act title: %s", act_title)
+    if title_fn_num:
+        log.info("Title footnote: [^%d]", title_fn_num)
+    if enacted_at:
+        log.info("Enacted at: %s", enacted_at)
 
     preamble = parse_preamble(detail_soup) or parse_preamble(toc_soup)
     if preamble:
@@ -2453,7 +2909,9 @@ def scrape_act(
             if enacted_at:
                 log.info("Enacted at (from preamble): %s", enacted_at)
         if not description:
-            description = next((l.strip() for l in preamble.splitlines() if l.strip()), "")[:200]
+            description = next(
+                (l.strip() for l in preamble.splitlines() if l.strip()), ""
+            )[:200]
         nodes.insert(0, PreambleItem(text=preamble))
 
     footnotes = parse_footnotes(detail_soup)
@@ -2466,19 +2924,34 @@ def scrape_act(
         if isinstance(node, SectionItem) and node.number:
             bid = _secnum_to_block_id(node.number)
             if bid in seen_nums:
-                log.warning("act-%s: duplicate section number %s", act_number, node.number)
+                log.warning(
+                    "act-%s: duplicate section number %s", act_number, node.number
+                )
             seen_nums.add(bid)
 
     log.info("act-%s: building Markdown …", act_number)
+    _NUMBERING.items = []
     md = build_markdown(
-        nodes, act_number,
-        act_title=act_title, act_url=act_url_str,
-        scraper=scraper, title_footnote_num=title_fn_num,
-        enacted_at=enacted_at, description=description,
+        nodes,
+        act_number,
+        act_title=act_title,
+        act_url=act_url_str,
+        scraper=scraper,
+        title_footnote_num=title_fn_num,
+        enacted_at=enacted_at,
+        description=description,
     )
     tmp = output.with_suffix(".md.tmp")
     tmp.write_text(md, encoding="utf-8")
     tmp.replace(output)
+    numbering = _NUMBERING.items
+    _NUMBERING.items = None
+    num_dir = output.parent / ".numbering"
+    num_dir.mkdir(exist_ok=True)
+    (num_dir / f"act-{act_number}.json").write_text(
+        json.dumps({"act": int(act_number), "items": numbering}, ensure_ascii=False, indent=1),
+        encoding="utf-8",
+    )
     log.info("act-%s: saved -> %s  (%d chars)", act_number, output, len(md))
 
 
@@ -2515,9 +2988,15 @@ def _save_progress(output_dir: Path, completed: set[int]) -> None:
 
 
 def _scrape_all_acts(
-    output_dir: Path, delay: float, max_retries: int,
-    cache_dir: Optional[Path], workers: int, skip_existing: bool,
-    act_from: int, act_to: int, force_refresh: bool,
+    output_dir: Path,
+    delay: float,
+    max_retries: int,
+    cache_dir: Optional[Path],
+    workers: int,
+    skip_existing: bool,
+    act_from: int,
+    act_to: int,
+    force_refresh: bool,
     log: logging.Logger,
 ) -> None:
     """Scrape a range of acts in parallel and write Markdown files.
@@ -2547,8 +3026,15 @@ def _scrape_all_acts(
         if act_num in completed or (skip_existing and out_file.exists()):
             return act_num, "skip"
         try:
-            scrape_act(str(act_num), out_file, delay, max_retries, cache_dir, log,
-                       force_refresh=force_refresh)
+            scrape_act(
+                str(act_num),
+                out_file,
+                delay,
+                max_retries,
+                cache_dir,
+                log,
+                force_refresh=force_refresh,
+            )
             with _PROGRESS_LOCK:
                 completed.add(act_num)
                 _save_progress(output_dir, completed)
@@ -2560,8 +3046,12 @@ def _scrape_all_acts(
 
     if _RICH:
         with Progress(
-            SpinnerColumn(), TextColumn("[progress.description]{task.description}"),
-            BarColumn(), MofNCompleteColumn(), TimeElapsedColumn(), console=console,
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            MofNCompleteColumn(),
+            TimeElapsedColumn(),
+            console=console,
         ) as progress:
             task = progress.add_task("Scraping acts ...", total=len(acts))
             with ThreadPoolExecutor(max_workers=workers) as ex:
@@ -2576,7 +3066,9 @@ def _scrape_all_acts(
                         fail += 1
                         log.warning("act-%d: %s", act_num, status)
                     progress.advance(task)
-            progress.update(task, description=f"Done: {ok} ok, {skip} skipped, {fail} failed")
+            progress.update(
+                task, description=f"Done: {ok} ok, {skip} skipped, {fail} failed"
+            )
     else:
         with ThreadPoolExecutor(max_workers=workers) as ex:
             futures = {ex.submit(run_one, n): n for n in acts}
@@ -2633,28 +3125,29 @@ def generate_index(output_dir: Path, index_file: Path, log: logging.Logger) -> N
         m = re.search(r"\d+", p.stem)
         return int(m.group()) if m else 0
 
-    rows: list[tuple[str, str, str]] = []
+    rows: list[tuple[str, str, str, str]] = []
     for md_file in sorted(output_dir.glob("act-*.md"), key=_sort_key):
         try:
             fm = _read_fm(md_file.read_text(encoding="utf-8"))
         except OSError:
             continue
         act_id = fm.get("act_id", "").strip()
-        title  = fm.get("title", "").strip()
-        desc   = fm.get("description", "").strip().replace("|", "\\|")
+        title = fm.get("title", "").strip()
+        year = fm.get("year", "").strip()
+        desc = fm.get("description", "").strip().replace("|", "\\|")
         if act_id and title:
-            rows.append((act_id, title, desc))
+            rows.append((act_id, title, year, desc))
 
     lines = [
         "# Act Index",
         "",
         f"*{len(rows)} acts*",
         "",
-        "| Act Number | Act Name | Description |",
-        "| --- | --- | --- |",
+        "| Act Number | Year | Act Name | Description |",
+        "| --- | --- | --- | --- |",
     ]
-    for act_id, title, desc in rows:
-        lines.append(f"| {act_id} | [[act-{act_id}\\|{title}]] | {desc} |")
+    for act_id, title, year, desc in rows:
+        lines.append(f"| {act_id} | {year} | [[act-{act_id}\\|{title}]] | {desc} |")
     lines.append("")
 
     index_file.write_text("\n".join(lines), encoding="utf-8")
@@ -2667,37 +3160,107 @@ def generate_index(output_dir: Path, index_file: Path, log: logging.Logger) -> N
 
 
 @click.command()
-@click.option("--act", "act_number", default=None,
-              help="Act number from bdlaws.minlaw.gov.bd (e.g. 1710 for CrPC).")
-@click.option("--all", "scrape_all", is_flag=True, default=False,
-              help="Scrape all acts (1–1719) in parallel.")
-@click.option("--output", "-o", default=None,
-              help="Output Markdown file (single-act mode). Defaults to act-<number>.md.")
-@click.option("--output-dir", default="acts", show_default=True,
-              help="Output directory for --all mode.")
-@click.option("--delay", "-d", default=0.3, show_default=True, type=float,
-              help="Min seconds between HTTP requests per worker.")
-@click.option("--retries", "-r", default=4, show_default=True, type=int,
-              help="Max retry attempts per request.")
-@click.option("--cache-dir", default="cache", show_default=True, type=click.Path(),
-              help="Directory for raw HTML cache.")
-@click.option("--workers", "-w", default=4, show_default=True, type=int,
-              help="Parallel workers for --all mode.")
-@click.option("--skip-existing", is_flag=True, default=False,
-              help="Skip acts that already have an output file (--all mode).")
-@click.option("--from", "act_from", default=1, show_default=True, type=int,
-              help="First act number to scrape in --all mode.")
-@click.option("--to", "act_to", default=1719, show_default=True, type=int,
-              help="Last act number to scrape in --all mode (inclusive).")
-@click.option("--force-refresh", is_flag=True, default=False,
-              help="Ignore disk cache and fetch live pages.")
-@click.option("--verbose", "-v", is_flag=True, default=False,
-              help="Enable DEBUG-level logging.")
+@click.option(
+    "--act",
+    "act_number",
+    default=None,
+    help="Act number from bdlaws.minlaw.gov.bd (e.g. 1710 for CrPC).",
+)
+@click.option(
+    "--all",
+    "scrape_all",
+    is_flag=True,
+    default=False,
+    help="Scrape all acts (1–1719) in parallel.",
+)
+@click.option(
+    "--output",
+    "-o",
+    default=None,
+    help="Output Markdown file (single-act mode). Defaults to act-<number>.md.",
+)
+@click.option(
+    "--output-dir",
+    default="acts",
+    show_default=True,
+    help="Output directory for --all mode.",
+)
+@click.option(
+    "--delay",
+    "-d",
+    default=0.3,
+    show_default=True,
+    type=float,
+    help="Min seconds between HTTP requests per worker.",
+)
+@click.option(
+    "--retries",
+    "-r",
+    default=4,
+    show_default=True,
+    type=int,
+    help="Max retry attempts per request.",
+)
+@click.option(
+    "--cache-dir",
+    default="cache",
+    show_default=True,
+    type=click.Path(),
+    help="Directory for raw HTML cache.",
+)
+@click.option(
+    "--workers",
+    "-w",
+    default=4,
+    show_default=True,
+    type=int,
+    help="Parallel workers for --all mode.",
+)
+@click.option(
+    "--skip-existing",
+    is_flag=True,
+    default=False,
+    help="Skip acts that already have an output file (--all mode).",
+)
+@click.option(
+    "--from",
+    "act_from",
+    default=1,
+    show_default=True,
+    type=int,
+    help="First act number to scrape in --all mode.",
+)
+@click.option(
+    "--to",
+    "act_to",
+    default=1719,
+    show_default=True,
+    type=int,
+    help="Last act number to scrape in --all mode (inclusive).",
+)
+@click.option(
+    "--force-refresh",
+    is_flag=True,
+    default=False,
+    help="Ignore disk cache and fetch live pages.",
+)
+@click.option(
+    "--verbose", "-v", is_flag=True, default=False, help="Enable DEBUG-level logging."
+)
 def main(
-    act_number: Optional[str], scrape_all: bool, output: Optional[str],
-    output_dir: str, delay: float, retries: int, cache_dir: Optional[str],
-    workers: int, skip_existing: bool, act_from: int, act_to: int,
-    force_refresh: bool, verbose: bool,
+    act_number: Optional[str],
+    scrape_all: bool,
+    output: Optional[str],
+    output_dir: str,
+    delay: float,
+    retries: int,
+    cache_dir: Optional[str],
+    workers: int,
+    skip_existing: bool,
+    act_from: int,
+    act_to: int,
+    force_refresh: bool,
+    verbose: bool,
 ) -> None:
     """Scrape Bangladesh law acts and save as Obsidian-compatible Markdown.
 
@@ -2717,28 +3280,44 @@ def main(
     if scrape_all:
         try:
             _scrape_all_acts(
-                output_dir=Path(output_dir), delay=delay, max_retries=retries,
-                cache_dir=cache_path, workers=workers, skip_existing=skip_existing,
-                act_from=act_from, act_to=act_to, force_refresh=force_refresh,
+                output_dir=Path(output_dir),
+                delay=delay,
+                max_retries=retries,
+                cache_dir=cache_path,
+                workers=workers,
+                skip_existing=skip_existing,
+                act_from=act_from,
+                act_to=act_to,
+                force_refresh=force_refresh,
                 log=log,
             )
         except KeyboardInterrupt:
-            log.warning("Interrupted."); sys.exit(130)
+            log.warning("Interrupted.")
+            sys.exit(130)
     else:
         output_path = Path(output) if output else Path(f"act-{act_number}.md")
         try:
-            scrape_act(act_number=act_number, output=output_path,
-                       delay=delay, max_retries=retries,
-                       cache_dir=cache_path, log=log,
-                       force_refresh=force_refresh)
+            scrape_act(
+                act_number=act_number,
+                output=output_path,
+                delay=delay,
+                max_retries=retries,
+                cache_dir=cache_path,
+                log=log,
+                force_refresh=force_refresh,
+            )
         except requests.HTTPError as e:
-            log.error("HTTP error: %s", e); sys.exit(1)
+            log.error("HTTP error: %s", e)
+            sys.exit(1)
         except requests.ConnectionError as e:
-            log.error("Network error: %s", e); sys.exit(1)
+            log.error("Network error: %s", e)
+            sys.exit(1)
         except ValueError as e:
-            log.error("Parse error: %s", e); sys.exit(1)
+            log.error("Parse error: %s", e)
+            sys.exit(1)
         except KeyboardInterrupt:
-            log.warning("Interrupted."); sys.exit(130)
+            log.warning("Interrupted.")
+            sys.exit(130)
 
 
 if __name__ == "__main__":
