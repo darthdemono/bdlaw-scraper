@@ -48,6 +48,7 @@ import sys
 import time
 import unicodedata
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -427,60 +428,125 @@ def scrape_collection(
 # Markdown writer
 # ---------------------------------------------------------------------------
 
+_RE_CASE = re.compile(r"\b(?:Vs?\.?|vs\.?)\s|\b(?:DLR|BLD|CLC|MLR|ADC|BLT|BLC|AIR)\b|\b(?:Act|Ordinance|Order)\b.*\d{4}")
+_RE_STATUS = re.compile(r"(?i)(?:now stands repealed|spent|sic|repealed|omitted)\.?")
+
+
+def _balanced(s: str, i: int) -> int:
+    """Index of the bracket closing the one at s[i], or -1."""
+    o, c = s[i], "]" if s[i] == "[" else ")"
+    depth = 0
+    for j in range(i, len(s)):
+        depth += (s[j] == o) - (s[j] == c)
+        if depth == 0:
+            return j
+    return -1
+
+
+def _is_reference(open_ch: str, inner: str) -> bool:
+    """True for a source citation: any [..] except bare numbers and status
+    notes, or a (..) holding a case, report or act citation."""
+    if open_ch == "[":
+        return bool(inner) and not inner.isdigit() and not _RE_STATUS.fullmatch(inner)
+    return len(inner) > 15 and bool(_RE_CASE.search(inner))
+
+
+def extract_references(definition: str, notes: list[str]) -> str:
+    """Replace each source citation in a definition with a footnote marker.
+
+    Citations are appended to notes (marker numbers continue across calls),
+    so a whole page can share one footnote list. A full stop that trailed a
+    bracketed citation is dropped, the marker already follows the sentence.
+    """
+    out: list[str] = []
+    i = 0
+    while i < len(definition):
+        ch = definition[i]
+        j = _balanced(definition, i) if ch in "[(" else -1
+        inner = re.sub(r"\s+", " ", definition[i + 1 : j]).strip(" .;") if j > 0 else ""
+        if j > 0 and _is_reference(ch, inner):
+            notes.append(re.sub(r"^(see also|see|cited by),?\s+", lambda m: m.group(0).capitalize(), inner, flags=re.I))
+            out = ["".join(out).rstrip(), f"[^{len(notes)}]"]
+            i = j + 1
+            if ch == "[" and definition[i : i + 1] == ".":
+                i += 1
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def tidy_text(t: str) -> str:
+    """Normalise whitespace and spacing around punctuation and markers."""
+    t = " ".join(unicodedata.normalize("NFC", t).split())
+    t = re.sub(r"\(\s+", "(", t)
+    t = re.sub(r"\s+([,;:.)])", r"\1", t)
+    t = re.sub(r"([,;:])(?=[A-Za-z\u201c\u2018])", r"\1 ", t)
+    t = re.sub(r"(\[\^\d+\])(?=[A-Za-z\u201c\u2018(])", r"\1 ", t)
+    return t.replace("()", "").strip()
+
+
+def _sort_key(term: str) -> str:
+    return re.sub(r"^[^A-Za-z0-9]+", "", term).casefold()
+
+
+def read_table_entries(path: Path) -> list[Entry]:
+    """Read entries back from an older two-column Term | Definition table."""
+    rows = [l for l in path.read_text(encoding="utf-8").split("\n") if l.startswith("|")][2:]
+    entries = []
+    for n, row in enumerate(rows, 1):
+        cells = [c.strip() for c in row.strip().strip("|").split("|")]
+        if len(cells) >= 2 and cells[0] and cells[1]:
+            entries.append(Entry(id=n, term=cells[0], definition=cells[1]))
+    return entries
+
+
 def write_markdown(entries: list[Entry], config: dict, output_path: Path) -> None:
-    """Write entries as Obsidian-compatible Markdown with YAML frontmatter.
+    """Write entries as an Obsidian-compatible page, A to Z.
 
-    Format:
-      YAML block  — title, source URL, scraped_at date, entry count.
-      # H1        — collection title.
-      ## Term     — one heading per entry.
-      *Category*  — italic category label (omitted if empty).
-      Definition  — plain paragraph (no table escaping needed).
-      ---         — horizontal rule between entries for semantic chunking.
-
+    Layout: YAML frontmatter, a jump line, then one section per initial
+    letter holding a Term | Definition table. Source citations are taken out
+    of the definitions and listed as footnotes at the end of the page.
     Writes atomically via a .tmp file renamed on success.
 
     @param entries      List of Entry objects to render.
     @param config       Collection config dict (for title and url_template).
     @param output_path  Destination .md file path.
     """
-    from datetime import datetime, timezone
-
-    title      = config["title"]
+    title = config["title"]
     source_url = config["url_template"].replace("/{id}.html", "/")
-    scraped_at = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    safe_title = title.replace('"', '\\"')
+    notes: list[str] = []
+    sections: dict[str, list[tuple[str, str]]] = {}
+    for e in sorted(entries, key=lambda e: _sort_key(e.term)):
+        term = tidy_text(e.term)
+        letter = _sort_key(term)[:1].upper()
+        sections.setdefault(letter if letter.isalpha() else "0-9", []).append(
+            (term, tidy_text(extract_references(e.definition, notes)))
+        )
+    order = sorted(sections, key=lambda k: (k == "0-9", k))
 
-    lines: list[str] = [
+    lines = [
         "---",
-        f'title: "{safe_title}"',
-        f"source: {source_url}",
-        f"scraped_at: {scraped_at}",
-        f"entries: {len(entries)}",
+        f'title: "{title}"',
+        f"URL: {source_url}",
+        f"description: {len(entries)} entries from clcbd.org, sorted A to Z, with the source of each definition in the footnotes.",
+        f"datetime: {datetime.now().strftime('%Y-%m-%dT%H:%M:%S')}",
+        "tags:",
+        "  - Legal",
+        "  - Bangladesh",
         "---",
         "",
-        f"# {title}",
-        "",
-        f"*{len(entries)} entries — scraped from clcbd.org*",
+        f"*{len(entries)} entries.* Jump to: " + " ".join(f"[{k}](#{k.lower()})" for k in order),
         "",
     ]
-
-    for e in entries:
-        lines.append("---")
+    for k in order:
+        lines += [f"## {k}", "", "| Term | Definition |", "| --- | --- |"]
+        lines += [f"| **{t.replace('|', chr(92) + '|')}** | {d.replace('|', chr(92) + '|')} |" for t, d in sections[k]]
         lines.append("")
-        lines.append(f"## {e.term}")
-        lines.append("")
-        if e.category:
-            lines.append(f"*{e.category}*")
-            lines.append("")
-        lines.append(e.definition)
-        lines.append("")
-
-    lines.append("---")
-    lines.append("")
+    lines += [f"[^{i}]: {n}" for i, n in enumerate(notes, 1)]
 
     tmp = output_path.with_suffix(".md.tmp")
-    tmp.write_text("\n".join(lines), encoding="utf-8")
+    tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
     tmp.replace(output_path)
 
 
@@ -556,6 +622,15 @@ def write_markdown(entries: list[Entry], config: dict, output_path: Path) -> Non
     help="Ignore disk cache and fetch live pages.",
 )
 @click.option(
+    "--reformat",
+    type=click.Path(exists=True, dir_okay=False),
+    default=None,
+    help=(
+        "Offline: re-render an older Term | Definition table file for the chosen "
+        "collection in the current layout (A to Z, footnoted sources). No fetching."
+    ),
+)
+@click.option(
     "--verbose",
     "-v",
     is_flag=True,
@@ -572,6 +647,7 @@ def main(
     from_id: int,
     skip_existing: bool,
     force_refresh: bool,
+    reformat: Optional[str],
     verbose: bool,
 ) -> None:
     """Scrape legal reference dictionaries (Law Dictionary, Latin Terms, Glossary) from clcbd.org."""
@@ -595,6 +671,15 @@ def main(
     out_path = Path(output_dir)
     out_path.mkdir(parents=True, exist_ok=True)
     cache_path = Path(cache_dir) if cache_dir else None
+
+    if reformat:
+        if collection == "all":
+            raise click.UsageError("--reformat needs a single --collection")
+        cfg = COLLECTIONS[collection]
+        entries = read_table_entries(Path(reformat))
+        write_markdown(entries, cfg, out_path / cfg["output"])
+        log.info("Reformatted %d entries from %s", len(entries), reformat)
+        return
 
     scraper = Scraper(
         delay=delay,

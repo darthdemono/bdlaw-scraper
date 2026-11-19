@@ -7,6 +7,8 @@
 - Original clause numbering is kept: each list item carries its marker in a `<!--n:(a)-->` comment, and every act gets a `.numbering/act-N.json` sidecar file.
 - Packaged as `bdlaw-scraper` with the commands `bdlaw-scraper`, `bdlaw-dictionaries`, `bdlaw-translate` and `bdlaw-pdf2md`.
 
+- Dictionary pages (Law Dictionary, Glossary, Latin Terms) are written A to Z with one section and table per letter. Source citations, such as `[Wilson’s Glossary]` and case references in parentheses, are moved out of the definitions into footnotes. `bdlaw-dictionaries --reformat FILE -c NAME` re-renders an older table file offline.
+
 ### Fixed
 
 - Cross-references to several sections at once ("sections 64, 65, 66 and 445") only linked the first number. Every known section in the list is now linked; a quantity after "and" ("sections 3 and 4 years") is left alone.
