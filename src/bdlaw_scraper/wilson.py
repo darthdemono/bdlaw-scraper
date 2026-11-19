@@ -43,7 +43,8 @@ LANG_CODES = {
     "A": "Arabic", "P": "Persian", "H": "Hindustani", "S": "Sanskrit", "Hind": "Hindi", "Mar": "Marathi",
     "Beng": "Bengali", "Ben": "Bengali", "Tel": "Telugu", "Tam": "Tamil", "Karn": "Kannada", "Kara": "Kannada",
     "Guz": "Gujarati", "Uriya": "Uriya", "Mal": "Malayalam", "Sindhi": "Sindhi", "Pali": "Pali", "Tur": "Turkish",
-    "Eng": "English", "Port": "Portuguese", "Fr": "French", "Cing": "Cingalese", "Mahr": "Marathi",
+    "Eng": "English", "Thug": "Thug argot", "Tibet": "Tibetan", "Tarn": "Tamil", "Mai": "Malayalam", "II": "Hindustani",
+    "Kar": "Kannada", "Mah": "Marathi", "Panj": "Panjabi", "Pers": "Persian", "Arab": "Arabic", "Sans": "Sanskrit", "Telu": "Telugu", "Port": "Portuguese", "Fr": "French", "Cing": "Cingalese", "Mahr": "Marathi",
 }
 _RE_LANG = re.compile(r"\b(" + "|".join(sorted(LANG_CODES, key=len, reverse=True)) + r")\.")
 # a parenthesis that holds native script: the OCR layer turns it into symbols and stray capitals
@@ -112,6 +113,23 @@ def entry_page(lines: list[Line]) -> bool:
     return sum(l.column == 0 for l in body) >= 8 and sum(l.column == 1 for l in body) >= 8
 
 
+def start_boundary(xs: list[float]) -> float:
+    """The x below which a line starts an entry, for one column of one page.
+
+    Lines start at the margin (small caps hang a little further left) or are continuation lines indented about
+    6 pt more. Two-means over the line starts finds the gap between the two groups, whatever this page's margin is.
+    """
+    xs = [x for x in xs if x < min(xs) + 25]
+    lo, hi = min(xs), max(xs)
+    if hi - lo < 4:
+        return lo + 11  # a single group: all starts, as before
+    for _ in range(20):
+        mid = (lo + hi) / 2
+        a, b = [x for x in xs if x < mid], [x for x in xs if x >= mid]
+        lo, hi = (sum(a) / len(a) if a else lo), (sum(b) / len(b) if b else hi)
+    return (lo + hi) / 2
+
+
 def split_entries(lines: list[Line], height: float) -> list[list[Line]]:
     """Group body lines into entries by indentation. Continuation lines of an entry are indented."""
     body = [l for l in lines if 72 <= l.y <= height - 60 and not l.text.isdigit()]
@@ -120,9 +138,9 @@ def split_entries(lines: list[Line], height: float) -> list[list[Line]]:
         cl = [l for l in body if l.column == col]
         if not cl:
             continue
-        margin = min(l.x for l in cl)
+        boundary = start_boundary([l.x for l in cl])
         for l in cl:
-            starts = l.x < margin + 11
+            starts = l.x < boundary
             if starts or not groups or groups[-1][-1].column != col and not groups[-1]:
                 groups.append([l])
             elif groups[-1][-1].column != col:
@@ -133,57 +151,147 @@ def split_entries(lines: list[Line], height: float) -> list[list[Line]]:
     return groups
 
 
-def join_lines(lines: list[Line]) -> str:
-    """Join an entry's lines, undoing end-of-line hyphenation ("com-" + "prising")."""
-    text = ""
-    for l in lines:
-        t = l.text.lstrip("→ ").strip()
-        if text.endswith("-") and t[:1].islower() and text[-2:-1].isalpha():
-            text = text[:-1] + t
-        else:
-            text = (text + " " + t).strip()
-    return text
+# Word-level reading of an entry: junk words (the OCR layer's reading of native script) become one ⟦native⟧ marker each.
+_RE_TOKEN = re.compile(r"^([(\[“‘\"]*)(.*?)([)\],.;:!?”’\"]*)$", re.S)
+_JUNK_CHARS = re.compile(r"[\^~£&*<>{}|\\«»_$@=+#%]|[^\x00-\u024f\u1e00-\u1eff\u2000-\u206f]")
+_CASE_SWITCH = re.compile(r"[a-z][A-Z]")
+_LETTER_DIGIT = re.compile(r"[A-Za-z]\d|\d[A-Za-z]")
+_COMMON = {"a", "an", "and", "or", "the", "of", "in", "to", "is", "as", "by", "for", "with", "from"}
 
 
-def _native_groups(text: str) -> tuple[str, list[dict]]:
-    """Replace parenthesised native-script groups with ⟦native⟧ and record the garbled OCR."""
-    native: list[dict] = []
-
-    def sub(m: re.Match) -> str:
-        inner = m.group(1)
-        if not _RE_NATIVE_JUNK.search(inner):
-            return m.group(0)
-        lead = _RE_LANG.match(inner)  # "(A. <arabic>, plur. of ...)": the code inside names the script
-        lang = lead.group(1) if lead else next((c for c in reversed(_RE_LANG.findall(text[: m.start()][-60:]))), "")
-        native.append({"raw": inner, "lang": lang})
-        return f"({lead.group(0)} ⟦native⟧)" if lead else "(⟦native⟧)"
-
-    return re.sub(r"\(([^()]*(?:\([^()]*\)[^()]*)?)\)", sub, text), native
+_WORDS_FILE = Path("/usr/share/dict/words")
+# the OCR layer reads the accented á of Wilson's romanisation as a d ("Bhdt" for Bhát), so d counts as a vowel here
+_VOWELS = "aeiouyáíúéóāīūàèìòùâêîôûd"
 
 
-def locate_native(native: list[dict], group: list[Line], page: int) -> None:
-    """Give each native group the page and the box of its words, found by searching its OCR text in the entry's words."""
-    flat = [(w, i) for i, l in enumerate(group) for w in l.words]
-    joined, starts = "", []
-    for w, _ in flat:
-        starts.append(len(joined))
-        joined += w[0] + " "
-    cursor = 0
-    for n in native:
-        n["page"], n["boxes"] = page, []
-        at = joined.find(n["raw"].strip(), cursor)
-        if at < 0 or not n["raw"].strip():
+def fold(word: str) -> str:
+    """Lower case, accents removed: the key for every vocabulary lookup."""
+    return "".join(c for c in unicodedata.normalize("NFD", word.lower()) if not unicodedata.combining(c))
+
+
+def english_words(path: Path = _WORDS_FILE) -> set[str]:
+    """The system's English word list (empty when the file is missing)."""
+    return {fold(w.strip()) for w in path.read_text(encoding="utf-8", errors="ignore").splitlines()} if path.exists() else set()
+
+
+def plausible(word: str, vocab: set[str]) -> bool:
+    """Is this letters-only word a real English word, a romanised South Asian word the book uses, or at least shaped like one?
+
+    The vocabulary decides first: English words and words the book repeats are accepted as they are.
+    Anything else must look like romanisation: a vowel, no letter three times in a row, no run of five consonants,
+    and not absurdly long. That rejects the OCR's `fffai`, `Stfsf` and `iTcjiSirr`.
+    """
+    parts = [p for p in re.split(r"[-'’]", word) if p]
+    if not parts or re.fullmatch(r"[ivxlcdm]+", word.lower()):  # roman numerals
+        return True
+    for part in parts:
+        f = fold(part)
+        if f in vocab or len(f) <= 2:
             continue
-        cursor = at + len(n["raw"])
-        hit = [flat[k] for k, st in enumerate(starts) if st < cursor and st + len(flat[k][0][0]) > at]
-        for line in dict.fromkeys(i for _, i in hit):
-            ws = [w for w, i in hit if i == line]
-            n["boxes"].append([round(min(w[1] for w in ws), 1), round(min(w[2] for w in ws), 1), round(max(w[3] for w in ws), 1), round(max(w[4] for w in ws), 1)])
+        if not any(c in _VOWELS for c in part.lower()):
+            return False
+        if re.search(r"([^d])\1\1", f) or re.search(rf"[^{_VOWELS}]{{5,}}", part.lower()) or len(f) > 18:
+            return False
+    return True
 
 
-def parse_entry(text: str, page: int, column: int, main: bool) -> Optional[Entry]:
-    """Split an entry into term, languages and Latin text."""
-    clean, native = _native_groups(text)
+def is_junk(core: str, vocab: Optional[set[str]] = None) -> bool:
+    """A word that cannot be English or Wilson's romanisation: symbols, another script, a capital inside a word, digits inside a word.
+
+    With a `vocab` (see `plausible`) a letters-only word that is not a plausible word is junk too.
+    """
+    if not core or core in ("&c", "&"):  # "&c." is et cetera
+        return False
+    if _JUNK_CHARS.search(core) or _CASE_SWITCH.search(core):
+        return True
+    if _LETTER_DIGIT.search(core):
+        return not re.fullmatch(r"\d+(st|nd|rd|th|d|s)?|[A-Za-z]\d+|\d+[A-Za-z]", core)
+    if vocab is not None and re.fullmatch(r"[^\W\d_]+(?:[-'’][^\W\d_]+)*", core):
+        return not plausible(core, vocab)
+    return False
+
+
+def build_lexicon(pages: list[tuple[float, float, list["Line"]]]) -> set[str]:
+    """The vocabulary: the English word list plus every word the book itself repeats (its romanised terms) at least four times."""
+    from collections import Counter
+
+    count = Counter(
+        fold(m.group(2)) for _w, _h, lines in pages for l in lines for t in l.text.split()
+        if (m := _RE_TOKEN.match(t)) and m.group(2).isalpha() and not is_junk(m.group(2)) and plausible(m.group(2), set())
+    )
+    return english_words() | {w for w, c in count.items() if c >= 4}
+
+
+def group_text(group: list["Line"], page: int, lex: set[str]) -> tuple[str, list[dict]]:
+    """The text of one entry (its lines in order) with every run of junk words replaced by ⟦native⟧.
+
+    Returns (text, native) where each native is {"raw", "lang", "page", "boxes"} (boxes in PDF points, one per printed line).
+    """
+    toks = []  # [lead, core, trail, line index, box, junk]
+    for li, l in enumerate(group):
+        for text, x0, y0, x1, y1 in l.words:
+            m = _RE_TOKEN.match(text.strip())
+            lead, core, trail = m.groups() if m else ("", text, "")
+            if "°" in core and re.search(r"[A-Za-z]°|°[A-Za-z]", core):
+                core = core.replace("°", "o")  # the layer reads an o as a degree sign: "fr°m", "°f"
+            toks.append([lead, core, trail, li, [x0, y0, x1, y1], is_junk(core, lex)])
+    # a parenthesis right after a language code holds the native word; it is junk unless it has real English in it
+    for i, t in enumerate(toks):
+        if t[0].startswith("(") and i and toks[i - 1][1].rstrip(".") in LANG_CODES and not t[5]:
+            end = next((k for k in range(i, min(i + 6, len(toks))) if toks[k][2].startswith(")")), None)
+            span = toks[i : (end + 1 if end is not None else i + 1)]
+            if not any(fold(w[1]) in lex and len(w[1]) >= 3 for w in span):
+                for w in span:
+                    w[5] = True
+    # one short ordinary word between two junk words belongs to the same native run
+    for i in range(1, len(toks) - 1):
+        if not toks[i][5] and toks[i - 1][5] and toks[i + 1][5] and len(toks[i][1]) <= 3 and toks[i][1].lower() not in _COMMON and fold(toks[i][1]) not in lex:
+            toks[i][5] = True
+    out, native, i, prev_line = "", [], 0, 0
+    while i < len(toks):
+        lead, core, trail, li, box, junk = toks[i]
+        j = i
+        if junk:
+            while j + 1 < len(toks) and toks[j + 1][5]:
+                j += 1
+            run = toks[i : j + 1]
+            lang = next((c.rstrip(".") for c in (t[1] for t in reversed(toks[max(0, i - 8) : i])) if c.rstrip(".") in LANG_CODES), "")
+            boxes: list[list[float]] = []
+            for line in dict.fromkeys(t[3] for t in run):
+                bs = [t[4] for t in run if t[3] == line]
+                boxes.append([round(min(b[0] for b in bs), 1), round(min(b[1] for b in bs), 1), round(max(b[2] for b in bs), 1), round(max(b[3] for b in bs), 1)])
+            native.append({"raw": " ".join(t[1] for t in run), "lang": lang, "page": page, "boxes": boxes})
+            piece = lead + "⟦native⟧" + toks[j][2]
+        else:
+            piece = lead + core + trail
+        if out.endswith("-") and li != prev_line and piece[:1].islower() and len(out) > 1 and out[-2].isalpha():
+            out = out[:-1] + piece  # undo end-of-line hyphenation
+        else:
+            out = (out + " " + piece).strip()
+        prev_line = toks[j][3]
+        i = j + 1
+    return re.sub(r"\)\)(?!\))", ")", out) if out.count(")") > out.count("(") else out, native
+
+
+_LANG_ALT = "|".join(sorted(LANG_CODES, key=len, reverse=True))
+# a new headword and its language code after a finished sentence: two entries that ran into one line
+_RE_RUNON = re.compile(rf"(?<=[.;:?])\s+(?=[A-Z][\w'’\-]{{2,}}(?:(?:,| or) [A-Z][\w'’\-]+)*,? (?:{_LANG_ALT})\.\s)")
+
+
+def split_runons(text: str, native: list[dict]) -> list[tuple[str, list[dict]]]:
+    """Split one text into entries where a headword with its language code starts after a finished sentence."""
+    parts = _RE_RUNON.split(text)
+    out, k = [], 0
+    for part in parts:
+        n = part.count("⟦native⟧")
+        out.append((part, native[k : k + n]))
+        k += n
+    return out
+
+
+def parse_entry(text: str, page: int, column: int, main: bool, native: Optional[list[dict]] = None) -> Optional[Entry]:
+    """Split an entry into term, languages and Latin text. `native` are the groups behind the ⟦native⟧ markers."""
+    clean, native = text, native or []
     head = re.match(r"^(?P<term>[^()]{1,90}?)(?:,\s*|\s+)(?=(?:\(|[A-Z][a-z]*\.|&c\.|corruptly|also|or\b))", clean)
     term = (head.group("term") if head else clean.split(",")[0]).strip(" ,.;")
     if not term or len(term) > 90:
@@ -193,6 +301,8 @@ def parse_entry(text: str, page: int, column: int, main: bool) -> Optional[Entry
         name = LANG_CODES[code]
         if name not in langs:
             langs.append(name)
+    if not langs and re.match(r"^[^()]{1,90}?[,\s]\(\?\)", clean):
+        langs = ["unknown"]  # Wilson prints (?) where he does not know the language
     return Entry(page, column, term, langs, clean, native, main)
 
 
@@ -240,24 +350,60 @@ def fold_fragments(entries: list[Entry]) -> list[Entry]:
     return out
 
 
-def build_entries(pdf: Path) -> list[Entry]:
-    """All entries of the book in reading order."""
+_RE_TAGS = re.compile(r"</?[a-zA-Z][^>]*>")
+
+
+def is_small_caps(first: str) -> bool:
+    """A main headword: its first word is all capitals, three letters or more ("AJNA", "ÁJNÁ", "BUDH-GANGA,")."""
+    word = re.split(r"[,\s(]", first.lstrip("→ ").strip(), maxsplit=1)[0]
+    letters = re.sub(r"[^\w]|\d|_", "", word)
+    return len(letters) >= 3 and letters.isupper()
+
+
+def reading_text(group: list["Line"], page: int, lex: set[str], readings: dict[str, str]) -> tuple[str, list[dict]]:
+    """The entry's text from the image readings of its lines; a line with no reading falls back to the text layer."""
+    from bdlaw_scraper.wilson_lines import line_key
+
+    out, native = "", []
+    for l in group:
+        got = readings.get(line_key(page, l.column, l.y))
+        if got:
+            piece = _RE_TAGS.sub("", got).strip()
+        else:
+            piece, nat = group_text([l], page, lex)
+            native += nat
+        if out.endswith("-") and piece[:1].islower() and len(out) > 1 and out[-2].isalpha():
+            out = out[:-1] + piece  # undo end-of-line hyphenation
+        else:
+            out = (out + " " + piece).strip()
+    return out, native
+
+
+def build_entries(pdf: Path, readings: Optional[dict[str, str]] = None) -> list[Entry]:
+    """All entries of the book in reading order.
+
+    `readings` maps a line key (see wilson_lines.line_key) to the line as read from the page image. Where a line has
+    one it is used, with its accents and native-script words in place; otherwise the text layer is used.
+    """
+    pages = read_pages(pdf)
+    lex = build_lexicon(pages)
     entries: list[Entry] = []
-    for pno, (_w, h, lines) in enumerate(read_pages(pdf), 1):
+    for pno, (_w, h, lines) in enumerate(pages, 1):
         merged = merge_baselines(lines)
         if not entry_page(merged):
             continue
         for group in split_entries(merged, h):
-            first = group[0].text.lstrip("→ ")
-            e = parse_entry(join_lines(group), pno, group[0].column, main=bool(re.match(r"^[A-ZÁÍÚÉÓ][A-ZÁÍÚÉÓ'’\-]{2,}", first)))
-            if e is None:
-                continue
-            locate_native(e.native, group, pno)
-            if group[0].text.startswith("→") and entries:  # continues the previous entry
-                entries[-1].text += " " + e.text
-                entries[-1].native += e.native
-            else:
-                entries.append(e)
+            text, native = reading_text(group, pno, lex, readings or {})
+            continues = group[0].text.startswith("→")
+            for n, (part, nat) in enumerate(split_runons(text, native)):
+                e = parse_entry(part, pno, group[0].column, main=is_small_caps(part), native=nat)
+                if e is None:
+                    continue
+                if continues and n == 0 and entries:  # continues the previous entry
+                    entries[-1].text += " " + e.text
+                    entries[-1].native += e.native
+                else:
+                    entries.append(e)
     return assign_sections(entries)
 
 
@@ -314,6 +460,28 @@ def match_score(latin_context: str, native: str) -> int:
     best = max((fuzz.ratio(target, w) for w in words if w), default=0)
     joined = "".join(words)
     return int(max(best, fuzz.partial_ratio(target, joined) if len(target) >= 3 else 0))
+
+
+_SCRIPT_RUN = re.compile(
+    "[" + "".join(lo + "-" + hi for lo, hi in [("\u0600", "\u06ff"), ("\u0750", "\u077f"), ("\ufb50", "\ufdff"), ("\ufe70", "\ufeff"), ("\u0900", "\u097f"), ("\u0980", "\u09ff"),
+                                                    ("\u0a80", "\u0aff"), ("\u0b00", "\u0b7f"), ("\u0b80", "\u0bff"), ("\u0c00", "\u0c7f"), ("\u0c80", "\u0cff"), ("\u0d00", "\u0d7f")]) + "]"
+    "+(?:[ \u060c,]+[\u0600-\u06ff\u0750-\u077f\ufb50-\ufdff\ufe70-\ufeff\u0900-\u097f\u0980-\u09ff\u0a80-\u0aff\u0b00-\u0b7f\u0b80-\u0bff\u0c00-\u0c7f\u0c80-\u0cff\u0d00-\u0d7f]+)*"
+)
+
+
+def wrap_scripts(text: str) -> str:
+    """Wrap every run of native script in the text (already HTML-escaped) in a language-tagged span.
+
+    The language comes from the script and, where the script is shared, from the language code printed before it.
+    A word whose consonants do not match the Latin spelling around it gets class="check".
+    """
+    def one(m: re.Match) -> str:
+        codes = _RE_LANG.findall(text[max(0, m.start() - 70): m.start()])
+        code = codes[-1] if codes else ""
+        score = match_score(re.sub(r"<[^>]*>", "", text[max(0, m.start() - 160): m.start() + 160]), m.group(0))
+        return native_span(m.group(0), code, score < (30 if code in ("A", "P", "H", "Hind") else 40))
+
+    return _SCRIPT_RUN.sub(one, text)
 
 
 def native_span(text: str, code: str, check: bool = False) -> str:
@@ -373,6 +541,23 @@ def letter_of(e: Entry) -> str:
     return first if "A" <= first <= "Z" else "Other"
 
 
+def assign_letters(entries: list[Entry]) -> list[str]:
+    """The A to Z section of each entry: the letter of the latest main headword, so sub-entries and OCR-garbled headwords stay in place.
+
+    A headword whose letter jumps backwards or more than three ahead is an OCR error and is ignored. The supplement starts again at A.
+    """
+    out, current, section = [], "A", ""
+    for e in entries:
+        if e.section != section:
+            section, current = e.section, "A"
+        if e.main:
+            letter = letter_of(e)
+            if letter != "Other" and current <= letter <= chr(ord(current) + 3):
+                current = letter
+        out.append(current)
+    return out
+
+
 def _names(e: Entry) -> list[str]:
     """The spellings a main headword goes by: "BUDH-GANGA, BooDH-GuNGA" -> both, plain letters, lower case."""
     out = []
@@ -394,63 +579,94 @@ def link_see(text: str, targets: dict[str, tuple[str, str]], folder: str) -> str
         key = "".join(c for c in unicodedata.normalize("NFD", name.lower()) if not unicodedata.combining(c))
         key = re.sub(r"[^a-z\- ]", "", key).strip()
         hit = targets.get(key)
-        return f"[[{folder}/{hit[0]}#^{hit[1]}|{name}]]" if hit else name
+        return (f"[[{folder}{hit[0]}|{name}]]" if hit[0].startswith("#") else f"[[{folder}/{hit[0]}#^{hit[1]}|{name}]]") if hit else name
 
     return _RE_SEE.sub(lambda m: m.group(1) + " " + re.sub(r"[A-Z][\w'’\-]*", one, m.group(2)), text)
 
 
-def render_notes(entries: list[Entry], folder: str = "Wilson Glossary") -> dict[str, str]:
-    """One note per letter (glossary, then supplement) plus an index note. File name -> markdown."""
+_RE_CODES = re.compile(rf"^(?:(?:(?:{_LANG_ALT})\.|\(\?\))(?:\s*&amp;c\.)?[,\s]*)+")
+
+
+def _split_entry(e: Entry) -> tuple[str, str, str]:
+    """(headword with its native words, languages, meaning) of one entry as markdown cells."""
+    marks = iter(e.native)
+
+    def shown(n: dict) -> str:
+        return native_span(n["text"], n["lang"], n.get("check", False)) if n.get("text") else f"[unread {LANG_CODES.get(n['lang'], n['lang'] or '?')}]"
+
+    def fill(text: str) -> str:
+        """Native script printed in the text becomes spans; markers left by the text layer are filled from the recognised words."""
+        text = wrap_scripts(text)
+        for n in marks:
+            if "⟦native⟧" not in text:
+                break
+            text = text.replace("⟦native⟧", shown(n), 1)
+        return text.replace("⟦native⟧", "[unread]")
+
+    text = _escape(e.text)
+    term = _escape(e.term)
+    if not e.languages and len(e.term.split()) > 4:  # a sentence, not a headword: the entry's tail cut loose
+        return "", "", fill(text)
+    rest = text[len(term):] if text.startswith(term) else text
+    rest = _RE_CODES.sub("", rest.lstrip(" ,")).lstrip(" ,")
+    head = f"**{term}**" if text.startswith(term) else ""
+    first = re.match(r"^\(([^()]*)\)[,.;:]?\s*", rest)
+    if first and ("⟦native⟧" in first.group(1) or _SCRIPT_RUN.search(first.group(1))) and not re.search(r"[A-Za-z]{4,}", first.group(1).replace("⟦native⟧", "")):
+        head += " " + fill(first.group(1))
+        rest = rest[first.end():]
+    return head.strip(), ", ".join(e.languages), fill(rest).strip()
+
+
+def render_table(entries: list[Entry], title: str = "Wilson Glossary") -> str:
+    """The whole glossary as one note: an A to Z section per letter, each a table of term, language and meaning.
+
+    The supplement follows the main glossary under the same letter headings. "See X" references link to the
+    letter section that holds the headword, when exactly one headword has that name.
+    """
     kept = [e for e in entries if e.section in ("glossary", "supplement")]
     seen: dict[str, set] = {}
-    ids: dict[int, str] = {}
-    for n, e in enumerate(kept):
-        ids[id(e)] = f"w{n}"
+    letters_of = assign_letters(kept)
+    for e, letter in zip(kept, letters_of):
         if e.main and e.section == "glossary":
             for name in _names(e):
-                seen.setdefault(name, set()).add((letter_of(e), ids[id(e)]))
-    targets = {k: next(iter(v)) for k, v in seen.items() if len(v) == 1}
+                seen.setdefault(name, set()).add(letter)
+    targets = {k: (f"#{next(iter(v))}", "") for k, v in seen.items() if len(v) == 1}
     by_letter: dict[str, dict[str, list[str]]] = {}
-    for e in kept:
-        md = link_see(entry_markdown(e, ids[id(e)]), targets, folder)
-        by_letter.setdefault(letter_of(e), {}).setdefault(e.section, []).append(md)
-    letters = sorted(by_letter, key=lambda k: (k == "Other", k))
-    notes: dict[str, str] = {}
+    for e, letter in zip(kept, letters_of):
+        term, lang, meaning = _split_entry(e)
+        meaning = link_see(meaning, {k: (v[0], "") for k, v in targets.items()}, title)
+        by_letter.setdefault(letter, {}).setdefault(e.section, []).append(f"| {term} | {lang} | {meaning} |")
+    letters = sorted(by_letter)
+    counts = {sec: sum(e.section == sec for e in kept) for sec in ("glossary", "supplement")}
+    out = [
+        f"---\ntitle: {title}\ndescription: H. H. Wilson's Glossary of Judicial and Revenue Terms of British India (1855), rebuilt from a scan with its South Asian words.\ngenerated: true\ntags:\n  - Wilson\n---\n",
+        "H. H. Wilson, *A Glossary of Judicial and Revenue Terms, and of Useful Words Occurring in Official Documents Relating to the Administration of the Government of British India* (London, 1855). Public domain. Scan: Internet Archive, `glossaryofjudici00wilsuoft`.\n",
+        f"> [!Info] How this was made\n> A program rebuilt {counts['glossary']:,} entries and {counts['supplement']:,} supplement entries from the scan's text layer, and read the Arabic, Urdu, Devanagari, Bengali, Telugu, Kannada and other scripts from page images. "
+        "Nobody retyped or corrected it, so expect mistakes: lost accents, wrong letters in native scripts (Telugu and Kannada most), and some entries cut or run together. "
+        "A native word with a dashed underline did not match the Latin spelling beside it. `[unread …]` marks a word that could not be read. Check the printed book for anything that matters. "
+        "The book's own index of words and page numbers is not included.\n",
+        "**Letters:** " + " · ".join(f"[[{title}#{l}|{l}]]" for l in letters) + "\n",
+    ]
     for letter in letters:
         parts = by_letter[letter]
-        body = [f"## Glossary, {letter}", ""] + [t + "\n" for t in parts.get("glossary", [])]
+        out += [f"## {letter}", "", "| Term | Language | Meaning |", "|---|---|---|"] + parts.get("glossary", [])
         if parts.get("supplement"):
-            body += [f"## Supplement, {letter}", "", "The supplement at the end of the book, a second A to Z.", ""] + [t + "\n" for t in parts["supplement"]]
-        n_entries = sum(len(v) for v in parts.values())
-        notes[f"{letter}.md"] = (
-            f"---\ntitle: Wilson Glossary, {letter}\ndescription: Entries {letter} of H. H. Wilson's Glossary of Judicial and Revenue Terms (1855), read from a scan by a program.\n"
-            f"generated: true\ntags:\n  - Wilson\n---\n\n> [!Info] Generated from a scan\n"
-            f"> Text and native-script words were read from a scan of the 1855 book by a program, not typed by hand. Words marked in a different colour did not match their Latin spelling and may be misread.\n\n"
-            + "\n".join(body)
-        )
-    counts = {sec: sum(e.section == sec for e in kept) for sec in ("glossary", "supplement")}
-    links = " · ".join(f"[[{folder}/{l}|{l}]]" for l in letters)
-    notes["index.md"] = (
-        f"---\ntitle: {folder}\ndescription: H. H. Wilson's Glossary of Judicial and Revenue Terms of British India (1855), rebuilt from a scan with its South Asian words.\n"
-        f"generated: true\ntags:\n  - Wilson\n---\n\n"
-        f"H. H. Wilson, *A Glossary of Judicial and Revenue Terms, and of Useful Words Occurring in Official Documents Relating to the Administration of the Government of British India* (London, 1855). Public domain. Scan: Internet Archive, `glossaryofjudici00wilsuoft`.\n\n"
-        f"> [!Info] How this was made\n> A program rebuilt {counts['glossary']:,} entries and {counts['supplement']:,} supplement entries from the scan's text layer, and read the Arabic, Urdu, Devanagari, Bengali, Telugu, Kannada and other scripts from page images. "
-        f"Nobody retyped or corrected it, so expect mistakes: lost accents, wrong letters in native scripts (Telugu and Kannada most), and some entries run together. "
-        f"Native words that did not match the Latin spelling beside them are marked with a dashed underline. Words that could not be read at all show as `[unread …]`. Check the printed book for anything that matters. The book's own index of words and page numbers is not included.\n\n"
-        f"## Letters\n\n{links}\n"
-    )
-    return notes
+            out += ["", f"### Supplement, {letter}", "", "The supplement at the end of the book, a second A to Z.", "", "| Term | Language | Meaning |", "|---|---|---|"] + parts["supplement"]
+        out.append("")
+    return "\n".join(out)
 
 
 @click.command()
 @click.option("--pdf", required=True, type=click.Path(exists=True, dir_okay=False), help="The scanned book with its OCR text layer.")
 @click.option("--output-json", required=True, type=click.Path(), help="Where the entries are written.")
 @click.option("--output-md", default=None, type=click.Path(), help="Also write the glossary section as markdown.")
-@click.option("--output-dir", default=None, type=click.Path(), help="Write one note per letter plus an index here (an Obsidian folder).")
+@click.option("--output-table", default=None, type=click.Path(), help="Write the whole glossary as one note with a table per letter.")
+@click.option("--lines", default=None, type=click.Path(exists=True), help="JSON lines from bdlaw-wilson-lines: the book read line by line from the page images.")
 @click.option("--native", default=None, type=click.Path(exists=True), help="JSON lines from bdlaw-wilson-native to fill the native-script words.")
-def main(pdf: str, output_json: str, output_md: Optional[str], output_dir: Optional[str], native: Optional[str]) -> None:
+def main(pdf: str, output_json: str, output_md: Optional[str], output_table: Optional[str], lines: Optional[str], native: Optional[str]) -> None:
     """Rebuild Wilson's glossary entries from the PDF text layer."""
-    entries = build_entries(Path(pdf))
+    readings = {r["key"]: r["text"] for r in map(json.loads, Path(lines).read_text(encoding="utf-8").splitlines())} if lines else None
+    entries = build_entries(Path(pdf), readings)
     if native:
         rows = (json.loads(l) for l in Path(native).read_text(encoding="utf-8").splitlines())
         apply_native(entries, {r["id"]: r["text"] for r in rows if r["status"] == "ok"})
@@ -458,10 +674,8 @@ def main(pdf: str, output_json: str, output_md: Optional[str], output_dir: Optio
     Path(output_json).write_text(json.dumps([asdict(e) for e in entries], ensure_ascii=False, indent=1), encoding="utf-8")
     if output_md:
         Path(output_md).write_text(render_markdown(entries), encoding="utf-8")
-    if output_dir:
-        Path(output_dir).mkdir(parents=True, exist_ok=True)
-        for name, text in render_notes(entries).items():
-            (Path(output_dir) / name).write_text(text, encoding="utf-8")
+    if output_table:
+        Path(output_table).write_text(render_table(entries), encoding="utf-8")
     counts = {sec: sum(e.section == sec for e in entries) for sec in ("glossary", "supplement", "index")}
     click.echo(f"{len(entries)} entries {counts}, {sum(e.main for e in entries)} main headwords -> {output_json}")
 

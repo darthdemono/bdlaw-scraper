@@ -3,7 +3,9 @@ from bdlaw_scraper.wilson import (
     Line,
     assign_sections,
     entry_page,
-    join_lines,
+    group_text,
+    is_junk,
+    split_runons,
     merge_baselines,
     parse_entry,
     render_markdown,
@@ -20,14 +22,18 @@ def test_merge_baselines_joins_fragments_of_one_printed_line():
 def test_entries_split_by_indentation_and_columns():
     lines = [
         Line(0, 80, 47.2, "KARYAD, Mar. (x) A petty mahal; one com-"),
-        Line(0, 90, 60.0, "prising ten villages."),
-        Line(0, 100, 54.0, "Karjaddya, Ben. (y) Paying a debt."),
+        Line(0, 90, 56.0, "prising ten villages."),
+        Line(0, 100, 47.5, "Karjaddya, Ben. (y) Paying a debt."),
         Line(1, 80, 330.0, "KASA, Tel. (z) A son"),
         Line(1, 90, 343.0, "by a female slave."),
     ]
     groups = split_entries(lines, 761.0)
     assert [len(g) for g in groups] == [2, 1, 2]
-    assert join_lines(groups[0]).endswith("one comprising ten villages.")
+    words = lambda t, y: [(w, 0, y, 0, y + 9) for w in t.split()]
+    for g in groups[:1]:
+        for l in g:
+            l.words = words(l.text, l.y)
+    assert group_text(groups[0], 300, set())[0].endswith("one comprising ten villages.")
 
 
 def test_page_without_two_columns_is_not_an_entry_page():
@@ -37,10 +43,25 @@ def test_page_without_two_columns_is_not_an_entry_page():
 
 
 def test_parse_entry_keeps_languages_and_flags_native_script():
-    e = parse_entry("KARZ, H. (A. V*/) KARJ, Mar. (^) Debt: in Mohammadan law", 300, 0, True)
+    e = parse_entry("KARZ, H. (A. ⟦native⟧) KARJ, Mar. (⟦native⟧) Debt: in Mohammadan law", 300, 0, True, native=[{"raw": "x", "lang": "A"}, {"raw": "y", "lang": "Mar"}])
     assert e is not None and e.term == "KARZ"
     assert e.languages[:2] == ["Hindustani", "Arabic"] and "Marathi" in e.languages
     assert "⟦native⟧" in e.text and len(e.native) == 2 and e.native[0]["lang"] == "A"
+
+
+def test_junk_words_become_one_native_marker_with_boxes_and_language():
+    line = Line(0, 20, 10, "Abdi, H. (i_jU) Patrimonial, S. (^TW*f, a leaf)")
+    line.words = [(w, 10 + 20 * k, 20, 28 + 20 * k, 29) for k, w in enumerate(line.text.split())]
+    text, native = group_text([line], 35, set())
+    assert text == "Abdi, H. (⟦native⟧) Patrimonial, S. (⟦native⟧, a leaf)"
+    assert [n["lang"] for n in native] == ["H", "S"] and native[0]["boxes"] == [[50, 20, 68, 29]] and native[0]["page"] == 35
+    assert is_junk("iTcjiSirr") and is_junk("^«$Hf^O") and not is_junk("Abdar") and not is_junk("19th")
+
+
+def test_run_together_entries_split_after_a_finished_sentence():
+    parts = split_runons("JANANI, H. A mother. JANAZA, A. A funeral.", [])
+    assert [p for p, _ in parts] == ["JANANI, H. A mother.", "JANAZA, A. A funeral."]
+    assert len(split_runons("Abdar, H. A servant; see Ajya, S. portion.", [])) == 1
 
 
 def test_sections_glossary_supplement_and_front_matter_dropped():
@@ -57,16 +78,6 @@ def test_markdown_groups_by_letter_and_marks_native_words():
     md = render_markdown([e])
     assert md.startswith("## A") and "**ABAD**, H. (A. [native Arabic])" not in md or "[native" in md
     assert "**ABAD**" in md
-
-
-def test_locate_native_boxes():
-    from bdlaw_scraper.wilson import Line, locate_native
-
-    words = [("Abdi,", 10, 20, 30, 29), ("H.", 32, 20, 40, 29), ("(i_jU)", 42, 20, 70, 29), ("Patrimonial", 72, 20, 120, 29)]
-    group = [Line(0, 20, 10, "Abdi, H. (i_jU) Patrimonial", words)]
-    native = [{"raw": "i_jU", "lang": "H"}]
-    locate_native(native, group, 35)
-    assert native[0]["page"] == 35 and native[0]["boxes"] == [[42, 20, 70, 29]]
 
 
 def test_native_words_render_as_language_tagged_spans():
@@ -87,15 +98,15 @@ def test_match_score_flags_words_that_do_not_match_the_latin_headword():
     assert match_score("Abdi, H.", "नमूना") < 40
 
 
-def test_notes_split_by_letter_and_see_links_resolve():
-    from bdlaw_scraper.wilson import Entry, render_notes
+def test_table_page_has_a_row_per_entry_and_see_links_to_the_letter():
+    from bdlaw_scraper.wilson import Entry, render_table
 
-    a = Entry(40, 0, "ABDAR", ["Hindustani"], "ABDAR, H. A servant. See Adasatta and Zeta.", [], True)
-    b = Entry(41, 0, "ADASATTA", [], "ADASATTA, H. An estimate.", [], True)
-    notes = render_notes([a, b])
-    assert set(notes) == {"A.md", "index.md"}
-    assert "[[Wilson Glossary/A#^w1|Adasatta]]" in notes["A.md"] and "Zeta" in notes["A.md"] and "[[Wilson Glossary/A#^w0|Zeta" not in notes["A.md"]
-    assert "^w0" in notes["A.md"] and "generated: true" in notes["A.md"]
+    a = Entry(40, 0, "ABDAR", ["Hindustani"], "ABDAR, H. (⟦native⟧) A servant. See Adasatta and Zeta.", [{"raw": "x", "lang": "H", "text": "آبدار"}], True)
+    b = Entry(41, 0, "ADASATTA", ["Hindustani"], "ADASATTA, H. An estimate.", [], True)
+    page = render_table([a, b])
+    assert "| Term | Language | Meaning |" in page and "generated: true" in page
+    assert '| **ABDAR** <span lang="ur" dir="rtl">آبدار</span> | Hindustani | A servant.' in page
+    assert "[[Wilson Glossary#A|Adasatta]]" in page and "[[Wilson Glossary#A|Zeta" not in page
 
 
 def test_fold_fragments_joins_lowercase_pieces_to_the_entry_before():
@@ -106,3 +117,47 @@ def test_fold_fragments_joins_lowercase_pieces_to_the_entry_before():
     c = Entry(40, 0, "Karzi", [], "Karzi, H. Indebted.", [], False)
     out = fold_fragments([a, b, c])
     assert [e.term for e in out] == ["KARZ", "Karzi"] and out[0].text.endswith("money lent at interest.") and len(out[0].native) == 1
+
+
+def test_vocabulary_check_rejects_shapeless_words_and_keeps_real_ones():
+    from bdlaw_scraper.wilson import plausible
+
+    vocab = {"mortgagee", "zodiac", "kshatriya"}
+    assert is_junk("fffai", vocab) and is_junk("Stfsf", vocab) and is_junk("iTcjiSirr", vocab)
+    assert not is_junk("mortgagee", vocab) and not is_junk("Kshatriya", vocab) and not is_junk("Abdar", vocab)
+    assert plausible("Zamindári-ddr", vocab) and not plausible("Strtsk", vocab)
+
+
+def test_letters_follow_the_running_headword_and_ignore_ocr_jumps():
+    from bdlaw_scraper.wilson import Entry, assign_letters
+
+    mk = lambda term, main, sec="glossary": Entry(40, 0, term, [], term, [], main, sec)
+    es = [mk("ABDAR", True), mk("Lands held", False), mk("BAKI", True), mk("ZZZ", True), mk("Sub", False), mk("CHAK", True), mk("ABC", True, "supplement")]
+    assert assign_letters(es) == ["A", "A", "B", "B", "B", "C", "A"]
+
+
+def test_small_caps_headwords_with_accents_are_main():
+    from bdlaw_scraper.wilson import is_small_caps
+
+    assert is_small_caps("ÁJNÁ, in some dialects") and is_small_caps("BUDH-GANGA, BooDH") and is_small_caps("→ KARZ, H.")
+    assert not is_small_caps("Ajná patra, H. Ben.") and not is_small_caps("AB") and not is_small_caps("A. word")
+
+
+def test_native_script_in_the_text_becomes_language_tagged_spans():
+    from bdlaw_scraper.wilson import wrap_scripts
+
+    out = wrap_scripts("Ajir, A. (اجير مشترك) A hireling; S. (साजा) Order, Karjádáya, Ben. (কলাদায) debt")
+    assert '<span lang="ar" dir="rtl"' in out and "اجير مشترك</span>" in out
+    assert '<span lang="hi" dir="ltr"' not in out or 'lang="sa"' in out  # Devanagari after S. is Sanskrit
+    assert 'lang="sa"' in out and 'lang="bn"' in out
+
+
+def test_readings_replace_the_text_layer_and_undo_hyphenation():
+    from bdlaw_scraper.wilson import reading_text
+    from bdlaw_scraper.wilson_lines import line_key
+
+    a = Line(0, 100.0, 50.0, "Ajna, H. (^n$T) Order, com-")
+    b = Line(0, 110.0, 56.0, "mand.")
+    readings = {line_key(35, 0, 100.0): "ÁJNÁ, H. (साजा) Order, com-", line_key(35, 0, 110.0): "mand."}
+    text, native = reading_text([a, b], 35, set(), readings)
+    assert text == "ÁJNÁ, H. (साजा) Order, command." and native == []
