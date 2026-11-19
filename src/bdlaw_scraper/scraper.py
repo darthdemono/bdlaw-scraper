@@ -323,16 +323,17 @@ RE_BN_SECTION_NUM_BRACKET = re.compile(
 
 RE_SUBCHAPTER_HEAD = re.compile(r"^([A-Z])\.\s*-\s*(.+)$")
 
+# Bengali "ব্যাখ্যা" (explanation) and "ব্যতিক্রম" (exception) use the same callouts; the separator can be
+# "।-", "৷-" (a danda typed with U+09F7), ":" or ".-".
+_SEP = r"[-\u2013\u2014.।৷:]"
 _RE_EXPL_NUMBERED = re.compile(
-    r"^Explanation\s+([IVXLCDM]+|\d+)\s*[-\u2013.]+\s*(.*)", re.IGNORECASE
+    rf"^(?:Explanation|ব্যাখ্যা)\s+([IVXLCDM]+|\d+|[০-৯]+)\s*{_SEP}+\s*(.*)", re.IGNORECASE
 )
-_RE_EXPL_SINGLE = re.compile(r"^Explanation\s*[-\u2013.]+\s*(.*)", re.IGNORECASE)
+_RE_EXPL_SINGLE = re.compile(rf"^(?:Explanation|ব্যাখ্যা)\s*{_SEP}+\s*(.*)", re.IGNORECASE)
 _RE_EXCEP_NUMBERED = re.compile(
-    r"^Exception[s]?\s+([IVXLCDM]+|\d+)\s*[-\u2013.\u2014]+\s*(.*)", re.IGNORECASE
+    rf"^(?:Exception[s]?|ব্যতিক্রম)\s+([IVXLCDM]+|\d+|[০-৯]+)\s*{_SEP}+\s*(.*)", re.IGNORECASE
 )
-_RE_EXCEP_SINGLE = re.compile(
-    r"^Exception[s]?\s*[-\u2013.\u2014]+\s*(.*)", re.IGNORECASE
-)
+_RE_EXCEP_SINGLE = re.compile(rf"^(?:Exception[s]?|ব্যতিক্রম)\s*{_SEP}+\s*(.*)", re.IGNORECASE)
 _RE_ILLUSTRATIONS = re.compile(r"^Illustrations?\s*[-\u2013.]?\s*$", re.IGNORECASE)
 _RE_PROVIDED_STANDALONE = re.compile(
     r"^Provid(?:ed|e)\s*(?:further\s*)?(?:that\s*)?[-\u2013.:]+\s*$", re.IGNORECASE
@@ -365,7 +366,7 @@ _RE_TOC_LINK = re.compile(r"^\s*\[.+?\]\(https?://")
 _RE_ISOLATED_LABEL = re.compile(
     r"^\(([a-zA-Z0-9" + _BN_CONS + _BN_VOWELS + r"০-৯]+)\)\s*$"
 )
-_RE_ANNOTATION_BRACKETS_PREAMBLE = re.compile(r"\[(?!\*\s*\*)(.*?)\]", re.DOTALL)
+_RE_ANNOTATION_BRACKETS_PREAMBLE = re.compile(r"(?<!\[)\[(?!\[)(?!\*\s*\*)([^\[\]]*)\](?!\])", re.DOTALL)  # never a [[wikilink]]
 _RE_BDLAWS_ACT = re.compile(r"https?://bdlaws\.minlaw\.gov\.bd/act-(\d+)\.html")
 _RE_FN_PREFIX = re.compile(r"^(\[\^\d+\])")
 _RE_RESIDUAL_HTML = re.compile(r"</?(li|ol|ul|p|div|span|br)[^>]*>", re.IGNORECASE)
@@ -402,15 +403,28 @@ _SEC_NUM = r"\d+[A-Za-zক-হ]?(?:-[A-Za-z0-9]+)?"
 _RE_SECTION_REF = re.compile(
     rf"(?<!sub-)\b(sections?)\s+({_SEC_NUM}\b"
     rf"(?:(?:\s*,\s*(?:(?:and|or)\s+)?|\s+(?:and|or|to)\s+){_SEC_NUM}\b"
-    r"(?!\s+(?:years?|months?|days?|weeks?|times?|per\s*cent|percent|taka|rupees|hundred)))*)",
+    r"(?!\s+(?:years?|months?|days?|weeks?|times?|per\s*cent|percent|taka|rupees|hundred)))*)"
+    r"(?P<tail>(?:\([A-Za-z0-9]{1,4}\))*)",
     re.IGNORECASE,
 )
 _RE_SEC_NUM_IN_LIST = re.compile(_SEC_NUM)
-# Bengali: "ধারা ৩", "ধারা ১২৮, ১৩২, ১৩৪ ও ১৩৫", "ধারা ৫ হইতে ৯". "উপ-ধারা" (sub-section) is not a section.
+# Bengali: "ধারা ৩", "ধারা ১২৮, ১৩২, ১৩৪ ও ১৩৫", "ধারা ৫ হইতে ৯". "উপ-ধারা" (sub-section) is not a section,
+# but a tail of it: "ধারা ৫(২)(ক)" and "ধারা ৫ এর উপ-ধারা (২) এর দফা (ক)" stay one reference.
+_BN_PART = r"(?:উপ-?ধারা|উপ-?দফা|উপ-?অনুচ্ছেদ|দফা|প্যারা)"
+_BN_TAIL = (
+    r"(?P<tail>(?:\s*\([^()\s]{1,4}\))*"
+    rf"(?:\s*(?:এর\s+|র\s+)?{_BN_PART}\s*(?:\([^()\s]{{1,4}}\))+(?:\s*(?:এর|র))?)*)"
+)
 _RE_SECTION_REF_BN = re.compile(
-    rf"(?<!উপ-)(ধারাসমূহ|ধারা|অনুচ্ছেদসমূহ|অনুচ্ছেদ)\s+({_SEC_NUM}"
+    r"(?<!উপ-)(?<!উপ)(ধারাসমূহ|ধারা|অনুচ্ছেদসমূহ|অনুচ্ছেদ|বিধিসমূহ|বিধি|প্রবিধানসমূহ|প্রবিধান)"
+    rf"\s+({_SEC_NUM}"
     rf"(?:(?:\s*,\s*|\s+(?:ও|এবং|বা|হইতে)\s+){_SEC_NUM}"
-    r"(?!\s*(?:বৎসর|বছর|মাস|দিন|টাকা|শতাংশ|জন|টি))\b)*)"
+    r"(?!\s*(?:বৎসর|বছর|মাস|দিন|টাকা|শতাংশ|জন|টি))\b)*)" + _BN_TAIL
+)
+# Number first: "৫ ধারা", "৬ ও ৭ ধারার", "১২ নং ধারা". "ধারাবাহিক" (continuous) is not a section.
+_RE_SECTION_REF_BN_POST = re.compile(
+    rf"(?<![\d\w])(?P<nums>{_SEC_NUM}(?:(?:\s*,\s*|\s+(?:ও|এবং|বা)\s+){_SEC_NUM})*)\s*(?:নং\s+)?"
+    r"(?P<word>ধারা(?:সমূহ)?)(?:র|য়|য়ের|বলে|টি|গুলি)?(?![ঀ-৿])"
 )
 _RE_DEFINITION = re.compile(
     r"^(?:In this (?:Act|section|chapter|Part|Code)[,;]?\s+)?"
@@ -1128,7 +1142,7 @@ def parse_preamble(soup: BeautifulSoup) -> str:
         sup = span.find("sup")
         if sup and sup.get_text(strip=True).isdigit():
             span.replace_with(f"\u27e6{int(sup.get_text(strip=True))}\u27e7")  # survives bracket cleanup
-    raw = preamble_div.get_text(separator="\n")  # type: ignore[union-attr]
+    raw = _normalise(_tag_to_md_text(preamble_div))  # keeps the links to other acts; breaks only at real blocks
     raw = re.sub(r"\[\d+\]|\[\*+\s*\*+\]|\^\S+\^", "", raw)
     raw = re.sub(r"[^\S\n]+", " ", raw)
     raw = "\n".join(l.strip() for l in raw.splitlines())
@@ -1166,7 +1180,7 @@ def parse_preamble(soup: BeautifulSoup) -> str:
     # a lone "-" or ":" line under text would turn that text into a heading
     raw = "\n".join(l for l in raw.split("\n") if not re.fullmatch(r"\s*[-:=\u2013\u2014]+\s*", l))
     # a reference alone on its line belongs to the line after it, as a trailing mark
-    raw = re.sub("^\u27e6(\\d+)\u27e7\n([^\n]+)", "\\2\u27e6\\1\u27e7", raw, flags=re.M)
+    raw = re.sub("^\u27e6(\\d+)\u27e7\n?([^\n]+)", "\\2\u27e6\\1\u27e7", raw, flags=re.M)
     return re.sub("\u27e6(\\d+)\u27e7", r"[^\1]", raw)
 
 
@@ -1981,6 +1995,25 @@ def _convert_provided(text: str) -> str:
     return "\n".join(out)
 
 
+def _in_open_quote(lines: list[str], i: int) -> bool:
+    """True when line i sits inside a quotation that opened earlier in the same list item.
+
+    An amendment quotes the text it inserts, and that text can hold its own "ব্যাখ্যা:" line, which is
+    part of the quotation and not a callout of the section. The count starts at the nearest list item
+    ("(ক) ...") above, since a quotation does not outlive its item.
+    """
+    start = 0
+    for k in range(i - 1, -1, -1):
+        if re.match(r"^\s*\([^()\s]{1,5}\)\s", lines[k]):
+            start = k
+            break
+    before = "\n".join(lines[start:i])
+    return before.count("\u201c") > before.count("\u201d")
+
+
+_BN_CALLOUT_WORDS = ("ব্যাখ্যা", "ব্যতিক্রম")
+
+
 def _convert_numbered_callout(
     text: str, re_numbered: re.Pattern, re_single: re.Pattern, callout_name: str
 ) -> str:
@@ -2005,7 +2038,9 @@ def _convert_numbered_callout(
         raw_line = lines[i].strip()
         fn_m = _RE_FN_PREFIX.match(raw_line)
         check_line = raw_line[fn_m.end() :].lstrip() if fn_m else raw_line
-        if not re_numbered.match(check_line):
+        if not re_numbered.match(check_line) or (
+            check_line.startswith(_BN_CALLOUT_WORDS) and _in_open_quote(lines, i)
+        ):
             out.append(lines[i])
             i += 1
             continue
@@ -2077,6 +2112,10 @@ def _convert_single_callout(
         fn_m = _RE_FN_PREFIX.match(raw_line)
         check_line = raw_line[fn_m.end() :].lstrip() if fn_m else raw_line
         m = re_single.match(check_line)
+        if m and check_line.startswith(_BN_CALLOUT_WORDS) and (
+            _in_open_quote(lines, i) or not m.group(1).strip()
+        ):
+            m = None  # inside a quoted amendment, or a bare "ব্যাখ্যা:" with nothing after it
         if m:
             fn_prefix = (fn_m.group(1) + " ") if fn_m else ""
             content = fn_prefix + m.group(1).strip()
@@ -2354,13 +2393,22 @@ def _convert_definitions(text: str) -> str:
     return "\n".join(out)
 
 
+# Bengali counterparts: "দণ্ডিত হইবেন" (shall be punished), "দণ্ডনীয় হইবেন", "দায়ী হইবেন" (liable), the named
+# sentences. A trailing case ending (মৃত্যুদণ্ডে) stays inside the bold.
+_RE_PUNISHMENT_BN = re.compile(
+    r"(?<![ঀ-৿*])((?:যাবজ্জীবন|সশ্রম|বিনাশ্রম)\s+কারাদণ্ড|মৃত্যুদণ্ড|দণ্ডিত\s+হইবেন|দণ্ডনীয়\s+হইবেন|দায়ী\s+হইবেন)"
+    r"((?:ে|র|ের|কে)?)(?![ঀ-৿*])"
+)
+
+
 def _bold_punishment_keywords(text: str) -> str:
     """Wrap punishment-related phrases in **bold** for visual emphasis.
 
     @param text  Section text.
     @return      Text with phrases like "shall be punished with" bolded.
     """
-    return _RE_PUNISHMENT.sub(r"**\1**", text)
+    text = _RE_PUNISHMENT.sub(r"**\1**", text)
+    return _RE_PUNISHMENT_BN.sub(r"**\1\2**", text)
 
 
 def _mark_omitted_repealed(text: str) -> str:
@@ -2395,7 +2443,9 @@ def _linkify_section_refs(
     def replace_sec(m: re.Match) -> str:
         prefix = m.group(1)
         items = m.group(2)
+        tail = (m.group("tail") or "").rstrip() if "tail" in m.re.groupindex else ""
         first = True
+        single = len(_RE_SEC_NUM_IN_LIST.findall(items)) == 1
 
         def link(n: re.Match) -> str:
             nonlocal first
@@ -2404,13 +2454,24 @@ def _linkify_section_refs(
             label = f"{prefix} {num}" if first else num
             first = False
             if anchor not in known_sections:
-                return label
+                return label + (tail if single else "")
+            if single and tail:
+                label += tail  # "section 5(2)(a)", "ধারা ৫ এর উপ-ধারা (২)": the whole reference is the link
             return f"[[act-{act_number}#^sec-{anchor}\\|{label}]]"
 
         # Link every number of a list; the first keeps the word ("sections 64"), the rest are bare.
         return _RE_SEC_NUM_IN_LIST.sub(link, items)
 
-    for regex in (_RE_SECTION_REF, _RE_SECTION_REF_BN):
+    def replace_post(m: re.Match) -> str:
+        # "৫ ও ৬ ধারা": link the numbers, leave the word where it is
+        def link(n: re.Match) -> str:
+            anchor = _secnum_to_block_id(n.group(0))
+            return f"[[act-{act_number}#^sec-{anchor}\\|{n.group(0)}]]" if anchor in known_sections else n.group(0)
+
+        return _RE_SEC_NUM_IN_LIST.sub(link, m.group("nums")) + m.string[m.end("nums") : m.end()]
+
+    for regex in (_RE_SECTION_REF, _RE_SECTION_REF_BN, _RE_SECTION_REF_BN_POST):
+        post = regex is _RE_SECTION_REF_BN_POST
         result = []
         last = 0
         for m in regex.finditer(text):
@@ -2421,7 +2482,7 @@ def _linkify_section_refs(
                 result.append(text[last : m.end()])
             else:
                 result.append(text[last : m.start()])
-                result.append(replace_sec(m))
+                result.append(replace_post(m) if post else replace_sec(m))
             last = m.end()
         result.append(text[last:])
         text = "".join(result)
@@ -2744,26 +2805,29 @@ def _heading_to_slug(text: str, language: str = "en") -> str:
 
 
 def _fix_bengali_ocr(text: str) -> str:
-    """Correct common OCR misreads in Bengali text from the bdlaws scan.
+    """Correct the misreads and typing habits in Bengali text from the bdlaws scan.
 
-    Known substitutions:
-    - Consonant + ৪ + Consonant → Consonant + ৃ (ৃ vowel sign, misread as ৪).
-    - Consonant + ৷ before consonant/space → Consonant + ি (ি vowel, misread as ৷).
+    - Consonant + ৪ + Consonant → Consonant + ৃ (the vowel sign, misread as ৪).
+    - Consonant + ৷ + Consonant → Consonant + ি (the vowel sign, misread as ৷).
+    - Any other ৷ (U+09F7, a currency mark) is a danda written with the wrong character → ।.
+    - Legacy-font artefacts: "পর্যন্ত্ম" → "পর্যন্ত", "ত্মেগত্রে" → "ক্ষেত্রে".
+    - Word-final "ত্" is the khanda ta "ৎ".
+    - No space before , ; : । and one space after , ; between words.
 
-    @param text  Bengali section or preamble text.
-    @return      Text with OCR errors corrected.
+    @param text  Bengali section, preamble or whole-document text.
+    @return      Text with the errors corrected.
     """
-    _BN_C = "কখগঘঙচছজঝঞটঠডঢণতথদধনপফবভমযরলশষসহড়ঢ়য়ৎ"
-    text = re.sub(
-        r"([" + _BN_C + r"])৪([" + _BN_C + r"])",
-        r"\1ৃ\2",
-        text,
-    )
-    text = re.sub(
-        r"([" + _BN_C + r"])৷(?=[" + _BN_C + r"\s])",
-        r"\1ি",
-        text,
-    )
+    c = "কখগঘঙচছজঝঞটঠডঢণতথদধনপফবভমযরলশষসহড়ঢ়য়ৎ"
+    letter = "ঁ-ঃঅ-হ়া-ৌৎড়ঢ়য়"
+    text = re.sub(rf"([{c}])৪([{c}])", r"\1ৃ\2", text)
+    text = re.sub(rf"([{c}])৷(?=[{c}])", r"\1ি", text)
+    text = text.replace("৷", "।")
+    text = re.sub(r"([নস]্ত)্ম", r"\1", text)
+    text = re.sub(r"ত্ম([ািীুূৃেৈোৌ])গ", r"ক্ষ\1", text)
+    text = re.sub(r"(?<!আ)ত্মগ", "ক্ষ", text)
+    text = re.sub(r"ত্(?![ঀ-৿\u200c\u200d])", "ৎ", text)
+    text = re.sub(r"(?<=[ঀ-৿]) +([,;:।])", r"\1", text)
+    text = re.sub(rf"(?<=[{letter}])([,;])(?=[{letter}])", r"\1 ", text)
     return text
 
 
@@ -2996,6 +3060,7 @@ def build_markdown(
     for node in nodes:
         if isinstance(node, PreambleItem):
             preamble_text = _filter_stray_lines(node.text)
+            preamble_text = _linkify_section_refs(preamble_text, act_number, known_sections)
             if language == "bn":
                 preamble_text = _fix_bengali_ocr(preamble_text)
             lines.append("")
@@ -3106,7 +3171,7 @@ def build_markdown(
             lines.append(body)
             lines.append("")
 
-    text = _restart_callout_lists(_plain_undefined_refs("\n".join(lines)))
+    text = _fix_bengali_ocr(_restart_callout_lists(_plain_undefined_refs("\n".join(lines))))
     return _final_cleanup(text)
 
 
@@ -3228,8 +3293,10 @@ def scrape_act(
             if enacted_at:
                 log.info("Enacted at (from preamble): %s", enacted_at)
         if not description:
-            description = next(
-                (l.strip() for l in preamble.splitlines() if l.strip()), ""
+            description = re.sub(
+                r"\[\[[^\]|\\]*\\?\|([^\]]*)\]\]",
+                r"\1",
+                next((l.strip() for l in preamble.splitlines() if l.strip()), ""),
             )[:200]
         nodes.insert(0, PreambleItem(text=preamble))
 

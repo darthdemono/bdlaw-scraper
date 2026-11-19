@@ -10,6 +10,10 @@
 ### Fixed
 
 - Cross-references to several sections at once ("sections 64, 65, 66 and 445") only linked the first number. Every known section in the list is now linked; a quantity after "and" ("sections 3 and 4 years") is left alone.
+- Bengali references: "ধারা ৫(২)(ক)" and "ধারা ৫ এর উপ-ধারা (২) এর দফা (ক)" are one link to the section, number-first forms ("৫ ও ৬ ধারা") link their numbers, and "বিধি" and "প্রবিধান" count like "ধারা". "উপ-ধারা" and "উপধারা" are never taken for a section. English "section 5(2)(a)" links the same way.
+- The preamble keeps the links to the acts it names and its sentences are no longer split at each link, and section references inside it are linked.
+- Bengali text: a danda typed as "৷" (U+09F7) is written as "।", which also stops "২৪ক৷" turning into "২৪কি". Legacy-font artefacts ("পর্যন্ত্ম", "ত্মেগত্রে") are repaired, word-final "ত্" becomes "ৎ", and spacing around , ; : । is fixed.
+- Bengali "ব্যাখ্যা" and "ব্যতিক্রম" become Explanation and Exception callouts (not inside a quoted amendment), and Bengali punishment phrases are bold as in English.
 - "Firstly: ...", "Secondly: ..." paragraphs are lists too, and the list that follows an item (for example (1) and (2) under "Fourthly") nests under it. An inline "(a)" in the item opens that sub-list.
 - "First.- ...", "Second. ..." paragraphs (section 21 of the Penal Code and similar) are now real lists with the word as the marker.
 - Illustration lists inside callouts carried the section's running number ("5.") and rendered as plain text. Each callout list now starts at 1.
