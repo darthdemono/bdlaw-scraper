@@ -4,6 +4,7 @@
 
 ### Added
 
+- `bdlaw-wilson` can write the glossary as one note per letter (`--output-dir`), with `[[...]]` links for "See X" references, block anchors per entry, recognised native words as language-tagged spans, and a dashed mark on words whose consonants do not match the Latin spelling beside them (transliteration check). Entries cut mid-sentence are folded back together, and small-caps headwords that hang left of the right column are no longer lost.
 - `bdlaw-wilson-native` reads the native-script words of Wilson's glossary from page crops with surya, falling back to tesseract when the script is wrong for the entry's language code. `bdlaw-wilson` now stores each native word's page and box.
 - Original clause numbering is kept: each list item carries its marker in a `<!--n:(a)-->` comment, and every act gets a `.numbering/act-N.json` sidecar file.
 - Packaged as `bdlaw-scraper` with the commands `bdlaw-scraper`, `bdlaw-dictionaries`, `bdlaw-translate` and `bdlaw-pdf2md`.
