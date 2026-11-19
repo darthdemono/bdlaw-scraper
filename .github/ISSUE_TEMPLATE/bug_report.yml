@@ -1,0 +1,16 @@
+name: Bug report
+description: Something does not work as documented
+labels: [bug]
+body:
+  - type: input
+    id: version
+    attributes: { label: Version, description: "Output of: pip show bdlaw-scraper" }
+    validations: { required: true }
+  - type: input
+    id: act
+    attributes: { label: Act number and command, placeholder: "bdlaw-scraper --act 1106" }
+    validations: { required: true }
+  - type: textarea
+    id: what
+    attributes: { label: What happened and what you expected }
+    validations: { required: true }
