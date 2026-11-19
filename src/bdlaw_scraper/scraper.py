@@ -1731,6 +1731,8 @@ def convert_lists(text: str) -> str:
     n = len(lines)
     counts: dict[int, int] = {}
     last_was_list = False
+    prev_depth = 0
+    type_depth: dict[str, int] = {}
 
     first_lt = None
     for _line in lines:
@@ -1767,6 +1769,16 @@ def convert_lists(text: str) -> str:
             continue
 
         depth = effective_depth.get(lt, 1)
+        # An item may only be one level deeper than the item before it. A roman (i) list straight
+        # after a paragraph would otherwise be indented 6 spaces and Markdown would show it as code.
+        if not last_was_list:
+            type_depth = {}
+        if lt in type_depth:
+            depth = type_depth[lt]  # same kind of marker as an earlier item of this list
+        else:
+            depth = min(depth, prev_depth + 1 if last_was_list else 1)
+            type_depth[lt] = depth
+        prev_depth = depth
         pad = " " * (_LIST_INDENT * (depth - 1))
         cpad = " " * (_LIST_INDENT * depth)
 

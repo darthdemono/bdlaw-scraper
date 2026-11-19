@@ -9,6 +9,7 @@
 
 ### Fixed
 
+- A list that starts with a deep marker such as roman (i) straight after a paragraph was indented 6 spaces and shown as a code block (138 items in 92 acts). Items now start at the top level and nest only one level at a time.
 - Acts with an Explanation callout followed by an Illustration or Exception failed with `NameError: _RE_SECONDARY_HDR` (121 acts).
 
 ### Removed

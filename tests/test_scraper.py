@@ -137,6 +137,12 @@ class TestConvertLists:
         assert [i["marker"] for i in items] == ["(১)", "(ক)", "(২)"]
         assert [i["rendered"] for i in items] == ["1.", "1.", "2."]
 
+    def test_orphan_deep_item_is_not_indented_into_a_code_block(self):
+        result = convert_lists("Provided that:\n(i) first\n(ii) second")
+        items = [l for l in result.splitlines() if "<!--n:" in l]
+        assert all(not l.startswith(" ") for l in items)
+        assert items[0].startswith("1. <!--n:(i)-->") and items[1].startswith("2. <!--n:(ii)-->")
+
     def test_markdown_renderers_ignore_the_marker_comment(self):
         result = convert_lists("(1) Only")
         assert result.startswith("1. <!--n:(1)--> Only")
