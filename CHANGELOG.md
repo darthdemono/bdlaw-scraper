@@ -16,6 +16,8 @@
 
 - Act titles that end in a note ("…Act, 1950 (East Bengal Act)") now match footnote references to the plain name.
 
+- `bdlaw-terms` builds a glossary of defined terms from the definitions inside the acts: one note per initial letter, the newest wording first as the current definition, earlier wordings kept with what changed, the same wording in several acts listed once, and definitions that only point at another act listed as references. English and Bengali terms are kept apart.
+
 ### Fixed
 
 - Cross-references to several sections at once ("sections 64, 65, 66 and 445") only linked the first number. Every known section in the list is now linked; a quantity after "and" ("sections 3 and 4 years") is left alone.
