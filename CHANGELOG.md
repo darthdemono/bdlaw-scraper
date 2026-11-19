@@ -10,6 +10,10 @@
 ### Fixed
 
 - Cross-references to several sections at once ("sections 64, 65, 66 and 445") only linked the first number. Every known section in the list is now linked; a quantity after "and" ("sections 3 and 4 years") is left alone.
+- "First.- ...", "Second. ..." paragraphs (section 21 of the Penal Code and similar) are now real lists with the word as the marker.
+- Illustration lists inside callouts carried the section's running number ("5.") and rendered as plain text. Each callout list now starts at 1.
+- Headings that link nowhere and hold a footnote reference showed as literal "[...](#)" (328 headings in 117 acts). They are plain headings now, and amendment brackets inside a title are dropped.
+- A preamble ending in a lone dash turned its text into a heading.
 - Footnote references were lost in many places, leaving about 600 notes without a reference: Bengali-digit brackets were read as references, a footnote number in front of a bracketed word in a heading ("Prohibited 18 [entity]") or glued to a chapter name was dropped, the preamble lost its references, and a closer before an adjacent reference ("335[1995]") ate the first reference's bracket. Notes now keep their references. A bracketed year with no matching note stays plain text.
 - Editorial brackets that span several lines or sit open in front of a wikilink ("[[[act-354|..]]") are removed, and an amendment bracket around a sub-chapter heading no longer becomes a broken wikilink.
 - Footnote numbers are de-duplicated, nested "[28[29]" references split into two, block ids are unique, and a "[Omitted](c)" inside a heading is escaped so it is not read as a link.
