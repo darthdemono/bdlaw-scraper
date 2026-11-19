@@ -143,6 +143,95 @@ class TestConvertLists:
         assert all(not l.startswith(" ") for l in items)
         assert items[0].startswith("1. <!--n:(i)-->") and items[1].startswith("2. <!--n:(ii)-->")
 
+    def test_section_reference_lists_are_all_linked(self):
+        from bdlaw_scraper.scraper import _linkify_section_refs
+
+        known = {"64", "65", "66", "445"}
+        out = _linkify_section_refs("In sections 64, 65, 66 and 445, the word", "11", known)
+        assert "[[act-11#^sec-64\\|sections 64]]" in out
+        for n in ("65", "66", "445"):
+            assert f"[[act-11#^sec-{n}\\|{n}]]" in out
+
+    def test_a_quantity_after_a_section_is_not_linked(self):
+        from bdlaw_scraper.scraper import _linkify_section_refs
+
+        out = _linkify_section_refs("sections 3 and 4 years", "11", {"3", "4"})
+        assert "[[act-11#^sec-3" in out and "sec-4" not in out
+
+    def test_inserted_and_doubled_markers_are_list_items(self):
+        from bdlaw_scraper.scraper import _classify_item, _item_marker
+
+        assert _classify_item("(3B) text") == "decimal" and _item_marker("(3B) text") == "(3B)"
+        assert _classify_item("(১ক) পাঠ") == "bn_decimal" and _item_marker("(১ক) পাঠ") == "(১ক)"
+        assert _classify_item("(aa) a Commissioner") == "alpha" and _item_marker("(aa) x") == "(aa)"
+
+    def test_table_rows_are_never_split_into_list_items(self):
+        from bdlaw_scraper.scraper import _split_inline_list_items
+
+        row = "| 3. | (i) Catering; (ii) Cleaning; (iii) Security |"
+        assert _split_inline_list_items(row) == row
+
+    def test_footnote_numbers_survive_in_headings(self):
+        from bdlaw_scraper.scraper import _clean_heading
+
+        assert _clean_heading("33 [অপরাধীকে আশ্রয় প্রদানের শাস্তি]") == "অপরাধীকে আশ্রয় প্রদানের শাস্তি[^33]"
+        assert _clean_heading("[5 Short title]") == "Short title[^5]"
+        assert "[ * * * ]" in _clean_heading("82 [***] Voluntary registration")
+
+    def test_bengali_section_references_are_linked(self):
+        from bdlaw_scraper.scraper import _linkify_section_refs
+
+        known = {"3", "128", "132", "135"}
+        out = _linkify_section_refs("অর্থ ধারা ৩ এর অধীন; ধারা ১২৮, ১৩২ ও ১৩৫ এবং উপ-ধারা (৩)", "9", known)
+        assert "[[act-9#^sec-3\\|ধারা ৩]]" in out
+        assert "[[act-9#^sec-132\\|১৩২]]" in out and "[[act-9#^sec-135\\|১৩৫]]" in out
+        assert "উপ-ধারা (৩)" in out
+
+    def test_references_to_other_acts_are_not_linked(self):
+        from bdlaw_scraper.scraper import _linkify_section_refs
+
+        assert "[[" not in _linkify_section_refs("under section 5 of the Evidence Act", "9", {"5"})
+        assert "[[" not in _linkify_section_refs("অর্থ আইন, ২০১৯ এর ধারা ৫৩", "9", {"53"})
+        assert "[[" in _linkify_section_refs("under section 5 of this Act", "9", {"5"})
+
+    def test_lowercase_repealed_by_is_not_struck_through(self):
+        from bdlaw_scraper.scraper import _mark_omitted_repealed
+
+        text = "any enactment not expressly repealed by this Act;"
+        assert _mark_omitted_repealed(text) == text
+        assert _mark_omitted_repealed("Repealed by section 3 of X.") == "~~Repealed by section 3 of X.~~"
+
+    def test_two_footnote_refs_in_one_word_run_both_survive(self):
+        from bdlaw_scraper.scraper import _transform_footnotes
+
+        assert _transform_footnotes("আইন, [11]২০১২[12]এর ধারা") == "আইন, [^11]২০১২[^12]এর ধারা"
+        assert "ABC" not in _transform_footnotes("text ^ABC^ more")
+        assert _transform_footnotes("[28[29]Text") == "[^28][^29]Text"
+
+    def test_unmatched_closing_brackets_are_dropped(self):
+        from bdlaw_scraper.scraper import _drop_unmatched_closers
+
+        assert _drop_unmatched_closers("a determine.]]") == "a determine."
+        assert _drop_unmatched_closers("[[act-1|x]] and [^2] [ * * * ]") == "[[act-1|x]] and [^2] [ * * * ]"
+        # an amendment bracket around several lines goes away with both ends
+        assert _drop_unmatched_closers("[line one\nline two]") == "line one\nline two"
+        assert _drop_unmatched_closers("[[act-1\\|x]] [^2] [ * * * ]") == "[[act-1\\|x]] [^2] [ * * * ]"
+
+    def test_bengali_bracketed_text_is_not_a_footnote_number(self):
+        from bdlaw_scraper.scraper import _transform_footnotes
+
+        assert _transform_footnotes("আইন, [11][২০১২] এর") == "আইন, [^11][২০১২] এর"
+
+    def test_links_to_missing_acts_point_at_the_official_site(self, tmp_path):
+        import logging
+
+        from bdlaw_scraper.scraper import relink_missing_acts
+
+        (tmp_path / "act-1.md").write_text("see [[act-1\\|Self]] and [[act-9#^sec-3\\|Gone Act]]", encoding="utf-8")
+        assert relink_missing_acts(tmp_path, logging.getLogger("t")) == 1
+        out = (tmp_path / "act-1.md").read_text(encoding="utf-8")
+        assert "[[act-1\\|Self]]" in out and "[Gone Act](http://bdlaws.minlaw.gov.bd/act-9.html)" in out
+
     def test_markdown_renderers_ignore_the_marker_comment(self):
         result = convert_lists("(1) Only")
         assert result.startswith("1. <!--n:(1)--> Only")
@@ -504,3 +593,54 @@ class TestJoinIsolatedLabels:
         text = "(a) already has content"
         result = _join_isolated_labels(text)
         assert result == text
+
+
+def test_clean_heading_mid_footnote_number():
+    from bdlaw_scraper.scraper import _clean_heading
+
+    assert _clean_heading("নিষিদ্ধ 18 [সত্তার] সদস্যপদ") == "নিষিদ্ধ [সত্তার] সদস্যপদ[^18]"
+
+
+def test_clean_heading_leading_footnote_number_then_text():
+    from bdlaw_scraper.scraper import _clean_heading
+
+    assert _clean_heading("2 [মহাপরিচালক], ইত্যাদি") == "[মহাপরিচালক], ইত্যাদি[^2]"
+
+
+def test_adjacent_footnote_refs_keep_their_brackets():
+    from bs4 import BeautifulSoup
+    from bdlaw_scraper.scraper import html_to_markdown
+
+    h = "<p>of June, <span class='footnote' title='x'><span class='word-formet'><sup class='en'><a href='2' >335</a></sup></span></span>[1995] (both)</p>"
+    assert "[^335][^1995]" in html_to_markdown(BeautifulSoup(h, "html.parser"))
+
+
+def test_year_in_brackets_without_a_note_stays_plain_text():
+    from bdlaw_scraper.scraper import _plain_undefined_refs
+
+    doc = "Code, [^18][^1898].\n\n[^18]: The figure was substituted."
+    assert _plain_undefined_refs(doc).startswith("Code, [^18][1898].")
+
+
+def test_preamble_keeps_footnote_reference():
+    from bs4 import BeautifulSoup
+    from bdlaw_scraper.scraper import parse_preamble
+
+    h = (
+        "<div class='preamble-content'><p><span class='footnote' title='x'><sup><a>1</a></sup></span>"
+        "*An Act to amend the law</p><p>Whereas it is expedient.</p></div>"
+    )
+    out = parse_preamble(BeautifulSoup(h, "html.parser"))
+    assert out.splitlines()[0].endswith("[^1]")
+
+
+def test_open_editorial_bracket_before_wikilink_is_dropped():
+    from bdlaw_scraper.scraper import _drop_unmatched_closers
+
+    assert _drop_unmatched_closers("by the [[[act-354|Customs Act]].") == "by the [[act-354|Customs Act]]."
+
+
+def test_bracket_followed_by_paren_in_heading_is_escaped():
+    from bdlaw_scraper.scraper import _RE_LINK_LOOKALIKE
+
+    assert _RE_LINK_LOOKALIKE.sub(r"\\[\1\\](", "(b) [Omitted](c) x") == "(b) \\[Omitted\\](c) x"

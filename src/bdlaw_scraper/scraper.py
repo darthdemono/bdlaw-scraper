@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import json
 import logging
+import copy
 import re
 import sys
 import threading
@@ -292,9 +293,12 @@ RE_MULTI_NEWLINE = re.compile(r"\n{3,}")
 
 RE_ALPHA_ITEM = re.compile(r"^\(([a-zA-Z])\)\s+(.*)", re.DOTALL)
 RE_ROMAN_ITEM = re.compile(r"^\(([ivxlcdmIVXLCDM]+)\)\s+(.*)", re.DOTALL)
-RE_DECIMAL_ITEM = re.compile(r"^\((\d+)\)\s+(.*)", re.DOTALL)
+# (1) and inserted numbers such as (3B) or (13AA); (১) and inserted (১ক), (১খ)
+RE_DECIMAL_ITEM = re.compile(r"^\((\d+[A-Za-z]{0,2})\)\s+(.*)", re.DOTALL)
+# doubled inserted letters: (aa), (bb)
+RE_ALPHA_DOUBLE_ITEM = re.compile(r"^\(([a-zA-Z])\1\)\s+(.*)", re.DOTALL)
 RE_BN_ALPHA_ITEM = re.compile(r"^\(([" + _BN_CONS + r"]+)\)\s+(.*)", re.DOTALL)
-RE_BN_DECIMAL_ITEM = re.compile(r"^\(([০-৯]+)\)\s+(.*)", re.DOTALL)
+RE_BN_DECIMAL_ITEM = re.compile(r"^\(([০-৯]+[" + _BN_CONS + r"]{0,2})\)\s+(.*)", re.DOTALL)
 RE_BN_VOWEL_ITEM = re.compile(r"^\(([" + _BN_VOWELS + r"])\)\s+(.*)", re.DOTALL)
 
 _SECNUM_CORE = r"[A-Za-z0-9]+(?:-[A-Za-z0-9]+)?(?:\.[A-Za-z0-9]+)?"
@@ -347,7 +351,7 @@ _RE_CONNECTOR = re.compile(
 _RE_NEST_EXPL_START = re.compile(r"^> \[!Explanation\]$")
 _RE_NEST_SECONDARY_HDR = re.compile(r"^> \[!(Illustrations?|Exception[s]?)\]$")
 
-_RE_HEADING_FOOTNOTE = re.compile(r"\[(\d{1,4})([^\d\]][^\]]*)\]")
+_RE_HEADING_FOOTNOTE = re.compile(r"\[([0-9]{1,4})([^0-9\]][^\]]*)\]")
 _RE_ANNOTATION_BRACKETS = re.compile(
     r"(?<!\[)\[(?!\s*\*)(?!\^)(?!\[)([^\[\]]*)\](?!\])", re.DOTALL
 )
@@ -388,10 +392,25 @@ _RE_PUNISHMENT = re.compile(
     r"shall be guilty of|imprisonment for life|rigorous imprisonment)\b(?!\*)",
     re.IGNORECASE,
 )
-_RE_OMITTED_INLINE = re.compile(r"\b(Omitted by [^.;]*[.;])", re.IGNORECASE)
-_RE_REPEALED_INLINE = re.compile(r"\b(Repealed by [^.;]*[.;])", re.IGNORECASE)
+# Notices such as "Omitted by section 3 of ..." start with a capital letter. Lower case "repealed by this
+# Act" is ordinary statute text and must not be struck through.
+_RE_OMITTED_INLINE = re.compile(r"\b(Omitted by [^.;\n]*[.;])")
+_RE_REPEALED_INLINE = re.compile(r"\b(Repealed by [^.;\n]*[.;])")
+_SEC_NUM = r"\d+[A-Za-zক-হ]?(?:-[A-Za-z0-9]+)?"
+# "section 64" or a list such as "sections 64, 65, 66 and 445" / "sections 3 or 4" / "sections 5 to 9".
+# A number after the first must not be a quantity ("sections 3 and 4 years").
 _RE_SECTION_REF = re.compile(
-    r"\b(sections?)\s+(\d+[A-Za-z]?(?:-[A-Za-z0-9]+)?)\b", re.IGNORECASE
+    rf"(?<!sub-)\b(sections?)\s+({_SEC_NUM}\b"
+    rf"(?:(?:\s*,\s*(?:(?:and|or)\s+)?|\s+(?:and|or|to)\s+){_SEC_NUM}\b"
+    r"(?!\s+(?:years?|months?|days?|weeks?|times?|per\s*cent|percent|taka|rupees|hundred)))*)",
+    re.IGNORECASE,
+)
+_RE_SEC_NUM_IN_LIST = re.compile(_SEC_NUM)
+# Bengali: "ধারা ৩", "ধারা ১২৮, ১৩২, ১৩৪ ও ১৩৫", "ধারা ৫ হইতে ৯". "উপ-ধারা" (sub-section) is not a section.
+_RE_SECTION_REF_BN = re.compile(
+    rf"(?<!উপ-)(ধারাসমূহ|ধারা|অনুচ্ছেদসমূহ|অনুচ্ছেদ)\s+({_SEC_NUM}"
+    rf"(?:(?:\s*,\s*|\s+(?:ও|এবং|বা|হইতে)\s+){_SEC_NUM}"
+    r"(?!\s*(?:বৎসর|বছর|মাস|দিন|টাকা|শতাংশ|জন|টি))\b)*)"
 )
 _RE_DEFINITION = re.compile(
     r"^(?:In this (?:Act|section|chapter|Part|Code)[,;]?\s+)?"
@@ -778,8 +797,8 @@ def _tag_to_md_text(node: object, scraper: Optional[Scraper] = None) -> str:
 
 
 def _normalise(text: str) -> str:
-    """Return NFC-normalised Unicode string."""
-    return unicodedata.normalize("NFC", text)
+    """Return NFC-normalised Unicode string without C1 control characters or byte-order marks."""
+    return unicodedata.normalize("NFC", re.sub("[\x80-\x9f]", "", text).replace(chr(0xFEFF), ""))
 
 
 def _get_text(tag: Tag) -> str:
@@ -1046,18 +1065,40 @@ def _extract_title_footnote_num(soup: BeautifulSoup) -> Optional[int]:
     return None
 
 
+# "[Omitted](c)" inside a heading would read as a link to "c"
+_RE_LINK_LOOKALIKE = re.compile(r"\[(?!\^)([^\[\]]*)\]\(")
+
+
 def _clean_heading(raw: str) -> str:
     """Remove footnote markers, outer brackets, and section-number prefixes from a heading string.
 
     @param raw  Raw heading text from div.txt-head.
     @return     Cleaned heading suitable for use in Markdown headings.
     """
-    h = _RE_HEADING_FOOTNOTE.sub(r"\2", raw).strip()
+    refs: list[int] = []
+
+    def _grab(m: re.Match) -> str:
+        refs.append(int(m.group(1)))
+        return m.group(2)
+
+    h = _RE_HEADING_FOOTNOTE.sub(_grab, raw).strip()
+    # "33 [Title]": the footnote number sits in front of the bracketed title
+    lead = re.match(r"^([0-9]{1,4})\s*\[(.*)\]$", h, re.S)
+    if lead:
+        refs.append(int(lead.group(1)))
+        h = lead.group(2).strip()
+    # "word 18 [Title]": the number sits mid-heading, in front of a bracketed word
+    def _mid(m: re.Match) -> str:
+        refs.append(int(m.group(2)))
+        return m.group(1) + "[" + m.group(3) + "]"
+
+    h = re.sub(r"(^|\s)(\d{1,4})\s*\[([^\]\d][^\]]*)\]", _mid, h)
     if h.startswith("[") and h.endswith("]"):
         h = h[1:-1].strip()
     h = re.sub(r"^\[\d+\]\s*", "", h)
+    h = re.sub(r"\[\s*\*\s*\*\s*\*\s*\]", "[ * * * ]", h)  # omission mark, as in the body
     h = re.sub(r"^[A-Za-z0-9]+(?:-[A-Za-z0-9]+)?(?:\.[A-Za-z0-9]+)?\.\s+", "", h)
-    return h.strip()
+    return h.strip() + "".join(f"[^{n}]" for n in dict.fromkeys(refs))
 
 
 def parse_preamble(soup: BeautifulSoup) -> str:
@@ -1081,6 +1122,11 @@ def parse_preamble(soup: BeautifulSoup) -> str:
                 break
     if not preamble_div:
         return ""
+    preamble_div = copy.copy(preamble_div)
+    for span in preamble_div.find_all("span", class_="footnote"):  # type: ignore[union-attr]
+        sup = span.find("sup")
+        if sup and sup.get_text(strip=True).isdigit():
+            span.replace_with(f"\u27e6{int(sup.get_text(strip=True))}\u27e7")  # survives bracket cleanup
     raw = preamble_div.get_text(separator="\n")  # type: ignore[union-attr]
     raw = re.sub(r"\[\d+\]|\[\*+\s*\*+\]|\^\S+\^", "", raw)
     raw = re.sub(r"[^\S\n]+", " ", raw)
@@ -1116,7 +1162,9 @@ def parse_preamble(soup: BeautifulSoup) -> str:
     raw = re.sub(r"\n{3,}", "\n\n", "\n".join(joined)).strip()
     if raw.startswith("[") and "]" not in raw.split("\n")[0]:
         raw = raw[1:].lstrip()
-    return raw
+    # a reference alone on its line belongs to the line after it, as a trailing mark
+    raw = re.sub("^\u27e6(\\d+)\u27e7\n([^\n]+)", "\\2\u27e6\\1\u27e7", raw, flags=re.M)
+    return re.sub("\u27e6(\\d+)\u27e7", r"[^\1]", raw)
 
 
 def parse_detail(soup: BeautifulSoup, base: str) -> Generator[DocNode, None, None]:
@@ -1163,6 +1211,9 @@ def parse_detail(soup: BeautifulSoup, base: str) -> Generator[DocNode, None, Non
                 chap_name = (
                     _normalise(chap_name_p.get_text(strip=True)) if chap_name_p else ""
                 )
+                glued = re.match(r"^(\d{1,3})(?=[ঀ-৿])", chap_name)
+                if glued:
+                    chap_name = chap_name[glued.end():] + f"[^{glued.group(1)}]"
                 full_chap = f"{chap_no}: {chap_name}" if chap_name else chap_no
                 yield ChapterItem(name=full_chap)
 
@@ -1239,14 +1290,18 @@ def _transform_footnotes(text: str) -> str:
 
     - "[**]" / "[***]" → "[ * * * ]"  (omission placeholder)
     - "[N]"            → "[^N]"        (numbered footnote reference)
-    - "^word^"         → ""            (superscript noise from OCR)
+    - "^word^"         → ""            (superscript noise from OCR, never spanning a bracket)
 
     @param text  Raw section text.
     @return      Text with footnote markers normalised.
     """
+    # Superscript noise first, and never across a bracket: "[11]২০১২[12]" holds two real references.
+    text = re.sub(r"\^[^\s\[\]^]+\^", "", text)
     text = re.sub(r"\[\*+(?:\s*\*+)+\]", "[ * * * ]", text)
-    text = re.sub(r"\[(\d+)\]", r"[^\1]", text)
-    text = re.sub(r"\^\S+\^", "", text)
+    # "[28[29]text" is two adjacent references, the first with its bracket left open
+    # Footnote numbers are ASCII digits; "[২০১২]" is bracketed text, not a footnote.
+    text = re.sub(r"\[([0-9]+)\[([0-9]+)\]", r"[\1][\2]", text)
+    text = re.sub(r"\[([0-9]+)\]", r"[^\1]", text)
     return text
 
 
@@ -1534,6 +1589,35 @@ def _strip_unmatched_open_brackets(text: str) -> str:
     return "\n".join(out)
 
 
+def _fix_omission_marks(text: str) -> str:
+    """Write the omission placeholder "[***]" as "[ * * * ]" so it is not read as bold markers."""
+    return re.sub(r"\[\s*\*\s*\*\s*\*\s*\]", "[ * * * ]", text)
+
+
+def _drop_unmatched_closers(text: str) -> str:
+    """Remove editorial brackets that survived stripping.
+
+    Two kinds are removed: a "]" that closes no "[", and a "[" ... "]" pair whose ends are on different
+    lines. Links, wikilinks, footnote references and omission marks never span lines; a bracket that does
+    is an amendment mark around several list items.
+    """
+    drop: set[int] = set()
+    stack: list[int] = []
+    for i, ch in enumerate(text):
+        if ch == "[":
+            stack.append(i)
+        elif ch == "]":
+            if not stack:
+                drop.add(i)
+            else:
+                start = stack.pop()
+                if "\n" in text[start:i]:
+                    drop.update((start, i))
+    # "[[[act-1|x]]": an editorial "[" left open in front of a wikilink
+    drop.update(i for i in stack if text.startswith("[[[", i))
+    return "".join(ch for i, ch in enumerate(text) if i not in drop)
+
+
 def _check_section_status(raw: str) -> Optional[str]:
     """Check if an entire section body is an omitted/repealed status marker.
 
@@ -1576,6 +1660,8 @@ def _classify_item(line: str) -> Optional[str]:
     m_alpha = RE_ALPHA_ITEM.match(s)
     if m_alpha:
         return "roman" if m_alpha.group(1).lower() == "i" else "alpha"
+    if RE_ALPHA_DOUBLE_ITEM.match(s):
+        return "alpha"
     return None
 
 
@@ -1603,7 +1689,8 @@ def _item_marker(line: str) -> str:
         m = pat.match(s)
         if m:
             return f"({m.group(1)})"
-    return ""
+    m = RE_ALPHA_DOUBLE_ITEM.match(s)
+    return f"({m.group(1) * 2})" if m else ""
 
 
 # Collected per act while building Markdown: one record per list item whose marker
@@ -1643,6 +1730,7 @@ def _extract_item_content(line: str) -> str:
         RE_BN_ALPHA_ITEM,
         RE_BN_DECIMAL_ITEM,
         RE_BN_VOWEL_ITEM,
+        RE_ALPHA_DOUBLE_ITEM,
     ):
         m = pat.match(s)
         if m:
@@ -1661,7 +1749,13 @@ def _split_inline_list_items(text: str) -> str:
     Handles patterns where list items are written inline separated by semicolons
     or commas, e.g. '...unsound mind ; (d) is or is deemed... ; and (e) has not...'
     """
-    return _RE_INLINE_ITEM_SEP.sub(lambda m: f"\n({m.group(1)})", text)
+    # Table rows must stay on one line: a newline inside a cell would break the row.
+    return "\n".join(
+        line
+        if line.lstrip().startswith("|")
+        else _RE_INLINE_ITEM_SEP.sub(lambda m: f"\n({m.group(1)})", line)
+        for line in text.split("\n")
+    )
 
 
 def _join_sentence_continuations(text: str) -> str:
@@ -2159,11 +2253,12 @@ def _mark_omitted_repealed(text: str) -> str:
 def _linkify_section_refs(
     text: str, act_number: str, known_sections: set = frozenset()
 ) -> str:
-    """Convert bare "section N" references to [[wikilinks]] pointing to block anchors.
+    """Convert "section N" and "ধারা N" references to [[wikilinks]] pointing to block anchors.
 
-    Only linkifies references to sections that exist in known_sections (built
-    from the act's own SectionItems). Skips matches that are already inside a
-    wikilink by checking for an unclosed "[[" in the preceding 10 characters.
+    Handles single references and lists ("sections 64, 65, 66 and 445", "ধারা ১২৮, ১৩২ ও ১৩৫").
+    Only sections that exist in known_sections (built from the act's own SectionItems) are linked.
+    References that name another act's section ("section 5 of the Evidence Act", "... আইনের ধারা ৫")
+    are left alone, as are matches already inside a wikilink.
 
     @param text            Section Markdown text.
     @param act_number      Act number string for the wikilink target (e.g. "1710").
@@ -2175,24 +2270,54 @@ def _linkify_section_refs(
 
     def replace_sec(m: re.Match) -> str:
         prefix = m.group(1)
-        num = m.group(2)
-        anchor = _secnum_to_block_id(num)
-        if anchor not in known_sections:
-            return m.group(0)
-        return f"[[act-{act_number}#^sec-{anchor}\\|{prefix} {num}]]"
+        items = m.group(2)
+        first = True
 
-    result = []
-    last = 0
-    for m in _RE_SECTION_REF.finditer(text):
-        before = text[max(0, m.start() - 10) : m.start()]
-        if "[[" in before and "]]" not in before:
-            result.append(text[last : m.end()])
-        else:
-            result.append(text[last : m.start()])
-            result.append(replace_sec(m))
-        last = m.end()
-    result.append(text[last:])
-    return "".join(result)
+        def link(n: re.Match) -> str:
+            nonlocal first
+            num = n.group(0)
+            anchor = _secnum_to_block_id(num)
+            label = f"{prefix} {num}" if first else num
+            first = False
+            if anchor not in known_sections:
+                return label
+            return f"[[act-{act_number}#^sec-{anchor}\\|{label}]]"
+
+        # Link every number of a list; the first keeps the word ("sections 64"), the rest are bare.
+        return _RE_SEC_NUM_IN_LIST.sub(link, items)
+
+    for regex in (_RE_SECTION_REF, _RE_SECTION_REF_BN):
+        result = []
+        last = 0
+        for m in regex.finditer(text):
+            before = text[max(0, m.start() - 10) : m.start()]
+            after = text[m.end() : m.end() + 40]
+            inside_link = "[[" in before and "]]" not in before
+            if inside_link or _names_other_act(text[max(0, m.start() - 30) : m.start()], after):
+                result.append(text[last : m.end()])
+            else:
+                result.append(text[last : m.start()])
+                result.append(replace_sec(m))
+            last = m.end()
+        result.append(text[last:])
+        text = "".join(result)
+    return text
+
+
+_RE_OTHER_ACT_AFTER = re.compile(
+    r"^\s+of\s+(?:the\s+)?(?!Act\b|Code\b|Ordinance\b|Order\b|Regulation\b)[A-Z]"
+)
+_RE_OTHER_ACT_BEFORE_BN = re.compile(
+    r"(?:এর|আইনের|অধ্যাদেশের|আদেশের|বিধির|বিধিমালার|সংবিধানের|কোডের|সংহিতার)\s*$"
+)
+_RE_THIS_ACT_BEFORE_BN = re.compile(r"এই\s+(?:আইনের|অধ্যাদেশের|আদেশের)\s*$")
+
+
+def _names_other_act(before: str, after: str) -> bool:
+    """True when a section reference belongs to a different act than the one being converted."""
+    if _RE_OTHER_ACT_AFTER.match(after):
+        return True
+    return bool(_RE_OTHER_ACT_BEFORE_BN.search(before)) and not _RE_THIS_ACT_BEFORE_BN.search(before)
 
 
 def _table_to_markdown(table: Tag) -> str:
@@ -2437,9 +2562,10 @@ def html_to_markdown(
     raw = _relocate_leading_footnotes(raw)
     # ][^N] → [^N]: orphaned bracket closer before footnote ref.
     # (?<!\]) excludes ]], (?<!\* ) excludes [ * * * ], (?!\]) avoids ]][ corner.
-    raw = re.sub(r"(?<!\])(?<!\* )\](?!\])(\[\^\d+\])", r"\1", raw)
+    raw = re.sub(r"(?<!\])(?<!\* )(?<!\d)\](?!\])(\[\^\d+\])", r"\1", raw)
     # Trailing stray ] from an unclosed editorial bracket; spares [ * * * ] and [^N].
     raw = re.sub(r"(?<!\])(?<!\* )(?<!\d)\]\s*$", "", raw.rstrip())
+    raw = _drop_unmatched_closers(raw)
     raw = RE_MULTI_NEWLINE.sub("\n\n", raw)
 
     return raw.strip()
@@ -2563,6 +2689,17 @@ def _infer_tags(act_title: str, nodes: list) -> list[str]:
     return tags[:8]
 
 
+def _clean_field(text: str) -> str:
+    """Strip control characters and stray zero-width marks from a title or description.
+
+    Zero-width joiners are kept only for Bengali text, where they are part of the spelling.
+    """
+    text = re.sub("[\x00-\x08\x0b-\x1f\x7f-\x9f]", "", text).replace(chr(0xFEFF), "").replace(chr(0x200B), "")
+    if not re.search("[ঀ-৿]", text):
+        text = text.replace(chr(0x200C), "").replace(chr(0x200D), "")
+    return _fix_omission_marks(" ".join(text.split()))
+
+
 def _build_yaml_frontmatter(
     act_title: str,
     act_url: str,
@@ -2590,14 +2727,18 @@ def _build_yaml_frontmatter(
     """
     scraped_at = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     tag_lines = "\n".join(f"  - {t}" for t in tags)
-    safe_title = act_title.replace('"', '\\"')
-    safe_desc = description.replace('"', '\\"')
+    # JSON strings are valid YAML: quotes, backslashes and control characters are escaped for us.
+    act_title = _clean_field(act_title)
+    description = _clean_field(description)
+    safe_title = json.dumps(act_title, ensure_ascii=False)
+    safe_desc = json.dumps(description or act_title, ensure_ascii=False)
     ascii_title = act_title.translate(BENGALI_DIGIT_MAP)
     year_m = re.search(r"\b(1[6-9]\d{2}|20\d{2})\b", ascii_title)
-    year_line = f"year: {year_m.group(1)}\n" if year_m else ""
+    year = year_m.group(1) if year_m else (enacted_at[:4] if enacted_at else "")
+    year_line = f"year: {year}\n" if year else ""
     act_id_line = f"act_id: {act_number}\n" if act_number else ""
     enacted_line = f"enacted_at: {enacted_at}\n" if enacted_at else ""
-    desc_line = f'description: "{safe_desc}"\n' if safe_desc else ""
+    desc_line = f"description: {safe_desc}\n"
     if section_entries:
         sec_block = "sections:\n" + "".join(
             f"  - id: {e['id']}\n    slug: {e['slug']}\n    url: {e['url']}\n"
@@ -2607,7 +2748,7 @@ def _build_yaml_frontmatter(
         sec_block = ""
     return (
         f"---\n"
-        f'title: "{safe_title}"\n'
+        f"title: {safe_title}\n"
         f"{desc_line}"
         f"tags:\n{tag_lines}\n"
         f"source_url: {act_url}\n"
@@ -2618,6 +2759,22 @@ def _build_yaml_frontmatter(
         f"language: {language}\n"
         f"{sec_block}"
         f"---\n"
+    )
+
+
+def _plain_undefined_refs(text: str) -> str:
+    """Turn a [^N] reference that has no [^N]: definition back into plain "[N]" text.
+
+    A bracketed year such as "[1898]" looks like a footnote reference to the converter.
+
+    @param text  Whole rendered document.
+    @return      Text with undefined references restored.
+    """
+    defined = set(re.findall(r"(?m)^\[\^(\d+)\]:", text))
+    return re.sub(
+        r"\[\^(\d+)\](?!:)",
+        lambda m: m.group(0) if m.group(1) in defined else f"[{m.group(1)}]",
+        text,
     )
 
 
@@ -2669,6 +2826,7 @@ def build_markdown(
     language = _detect_language(sample)
 
     known_sections: set[str] = set()
+    used_block_ids: set[str] = set()
     seen_section_ids: set[str] = set()
     section_entries: list[dict] = []
     for node in nodes:
@@ -2705,9 +2863,9 @@ def build_markdown(
 
     if act_title:
         if title_footnote_num is not None:
-            lines.append(f"# {act_title}[^{title_footnote_num}]")
+            lines.append(f"# {_fix_omission_marks(act_title)}[^{title_footnote_num}]")
         else:
-            lines.append(f"# {act_title}")
+            lines.append(f"# {_fix_omission_marks(act_title)}")
         lines.append("")
 
     for node in nodes:
@@ -2725,24 +2883,24 @@ def build_markdown(
             lines.append("")
             lines.append("## Footnotes")
             lines.append("")
-            seen: dict[str, int] = {}
-            deduped: list[tuple[int, str]] = []
+            # One definition per footnote number. (Two notes can share the same text; deduplicating
+            # by text used to drop the later number while the body still referenced it.)
+            seen_nums: set[int] = set()
             for num, text in node.notes:
-                if text not in seen:
-                    seen[text] = num
-                    deduped.append((num, text))
-            for num, text in deduped:
+                if num in seen_nums:
+                    continue
+                seen_nums.add(num)
                 lines.append(f"[^{num}]: {text}")
             lines.append("")
 
         elif isinstance(node, PartItem):
             lines.append("")
-            lines.append(f"## [{node.name}]({node.url})")
+            lines.append(f"## [{_fix_omission_marks(node.name)}]({node.url})")
             lines.append("")
 
         elif isinstance(node, ChapterItem):
             lines.append("")
-            lines.append(f"### [{node.name}]({node.url})")
+            lines.append(f"### [{_fix_omission_marks(node.name)}]({node.url})")
             lines.append("")
 
         elif isinstance(node, SubChapterItem):
@@ -2753,6 +2911,9 @@ def build_markdown(
             else:
                 heading_text = node.subtitle
             lines.append("")
+            if heading_text.startswith("[") and heading_text.endswith("]") and "[" not in heading_text[1:-1]:
+                heading_text = heading_text[1:-1].strip()  # an amendment bracket, not part of the title
+            heading_text = _RE_LINK_LOOKALIKE.sub(r"\\[\1\\](", heading_text)
             lines.append(f"#### [{heading_text}]({node.url})")
             lines.append("")
 
@@ -2781,8 +2942,16 @@ def build_markdown(
                         sec_id = _url_to_section_id(node.url)
                         if sec_id:
                             block_id = f"^sec-{sec_id}"
+                if block_id:
+                    # two sections can carry the same number; anchors must stay unique
+                    base_id, k = block_id, 2
+                    while block_id in used_block_ids:
+                        block_id = f"{base_id}-{k}"
+                        k += 1
+                    used_block_ids.add(block_id)
                 block_suffix = f" {block_id}" if block_id else ""
                 lines.append("")
+                heading_text = _RE_LINK_LOOKALIKE.sub(r"\\[\1\\](", heading_text)
                 lines.append(f"{level} [{heading_text}]({node.url}){block_suffix}")
                 if node.url and node.url != "#":
                     lines.append(f"<!-- url: {node.url} -->")
@@ -2800,7 +2969,8 @@ def build_markdown(
             lines.append(body)
             lines.append("")
 
-    return _final_cleanup("\n".join(lines))
+    text = _plain_undefined_refs("\n".join(lines))
+    return _final_cleanup(text)
 
 
 def _final_cleanup(md: str) -> str:
@@ -3098,12 +3268,46 @@ def _scrape_all_acts(
         print(f"Done: {ok} ok, {skip} skipped, {fail} failed")
 
     log.info("Batch complete: %d ok, %d skipped, %d failed", ok, skip, fail)
+    relink_missing_acts(output_dir, log)
     generate_index(output_dir, output_dir.parent / "act-index.md", log)
 
 
 # ---------------------------------------------------------------------------
 # Index generation
 # ---------------------------------------------------------------------------
+
+
+_RE_ACT_WIKILINK = re.compile(r"\[\[act-(\d+)(?:#\^[A-Za-z0-9-]+)?\\\|([^\]]*)\]\]")
+
+
+def relink_missing_acts(output_dir: Path, log: logging.Logger) -> int:
+    """Point wikilinks to acts that were not scraped at the official page instead.
+
+    The source site links to act numbers it no longer serves. A wikilink to a file that does not
+    exist is a dead link, so it becomes [text](official url).
+
+    @param output_dir  Directory containing the act-*.md files.
+    @param log         Logger instance.
+    @return            Number of links rewritten.
+    """
+    present = {p.stem for p in output_dir.glob("act-[0-9]*.md")}
+    changed = 0
+
+    def fix(m: re.Match) -> str:
+        nonlocal changed
+        if f"act-{m.group(1)}" in present:
+            return m.group(0)
+        changed += 1
+        return f"[{m.group(2)}]({BASE_URL}/act-{m.group(1)}.html)"
+
+    for path in output_dir.glob("act-[0-9]*.md"):
+        text = path.read_text(encoding="utf-8")
+        new = _RE_ACT_WIKILINK.sub(fix, text)
+        if new != text:
+            path.write_text(new, encoding="utf-8")
+    if changed:
+        log.info("Pointed %d links to missing acts at the official site", changed)
+    return changed
 
 
 def generate_index(output_dir: Path, index_file: Path, log: logging.Logger) -> None:
