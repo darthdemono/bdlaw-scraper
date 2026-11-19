@@ -705,3 +705,69 @@ def test_adverb_items_become_a_list_with_nested_sublist():
     assert "2. <!--n:Secondly--> [^15]Life;" in out
     assert "   1. <!--n:(1)--> Rigorous;" in out and "   2. <!--n:(2)--> Simple;" in out
     assert "4. <!--n:Fourthly--> Forfeiture;" in out
+
+
+def _lk(text):
+    from bdlaw_scraper.scraper import _linkify_section_refs
+
+    return _linkify_section_refs(text, "9", {"5", "6", "12a"})
+
+
+def test_bengali_subpart_tail_is_part_of_the_link():
+    assert _lk("ধারা ৫(২)(ক) এর বিধান") == "[[act-9#^sec-5\\|ধারা ৫(২)(ক)]] এর বিধান"
+    assert _lk("ধারা ৫ এর উপ-ধারা (২) এর দফা (ক) অনুযায়ী") == "[[act-9#^sec-5\\|ধারা ৫ এর উপ-ধারা (২) এর দফা (ক)]] অনুযায়ী"
+    assert _lk("ধারা ৫ এ") == "[[act-9#^sec-5\\|ধারা ৫]] এ"
+
+
+def test_bengali_number_first_reference():
+    assert _lk("৫ ও ৬ ধারার বিধান") == "[[act-9#^sec-5\\|৫]] ও [[act-9#^sec-6\\|৬]] ধারার বিধান"
+    assert _lk("ধারাবাহিক ৫ দিন") == "ধারাবাহিক ৫ দিন"
+
+
+def test_bengali_subsection_word_is_not_a_section():
+    assert _lk("উপ-ধারা ৫ এর") == "উপ-ধারা ৫ এর"
+    assert _lk("উপধারা ৫ এর") == "উপধারা ৫ এর"
+
+
+def test_other_act_reference_stays_unlinked_in_both_scripts():
+    assert _lk("পেনাল কোডের ধারা ৫") == "পেনাল কোডের ধারা ৫"
+    assert _lk("আয়কর আইন এর ৫ ধারাবলে") == "আয়কর আইন এর ৫ ধারাবলে"
+
+
+def test_english_tail_is_part_of_the_link():
+    assert _lk("under section 5(2)(a) the") == "under [[act-9#^sec-5\\|section 5(2)(a)]] the"
+
+
+def test_bengali_cleanup_fixes_danda_artefacts_and_spacing():
+    from bdlaw_scraper.scraper import _fix_bengali_ocr as fix
+
+    assert fix("কার্যকর হইবে৷ পরবর্তী") == "কার্যকর হইবে। পরবর্তী"  # danda typed with U+09F7
+    assert fix("আইন৷") == "আইন।"
+    assert fix("পর্যন্ত্ম") == "পর্যন্ত" and fix("প্রস্ত্মাব") == "প্রস্তাব"  # legacy-font artefacts
+    assert fix("ত্মেগত্রে") == "ক্ষেত্রে" and fix("ত্মগমতা") == "ক্ষমতা"
+    assert fix("আত্মগোপন") == "আত্মগোপন" and fix("আত্মীয়") == "আত্মীয়"  # real words stay
+    assert fix("সাত্") == "সাৎ"  # khanda ta
+    assert fix("আইন ,বিধি;নিয়ম") == "আইন, বিধি; নিয়ম"
+    assert fix("১,০০০ টাকা") == "১,০০০ টাকা"  # a comma inside a number is left alone
+
+
+def test_bengali_explanation_becomes_a_callout():
+    from bdlaw_scraper.scraper import _convert_single_callout, _RE_EXPL_NUMBERED, _RE_EXPL_SINGLE
+
+    out = _convert_single_callout("ব্যাখ্যা।- এই ধারার উদ্দেশ্য", _RE_EXPL_SINGLE, _RE_EXPL_NUMBERED, "Explanation")
+    assert out == "> [!Explanation]\n> এই ধারার উদ্দেশ্য"
+    assert _convert_single_callout("ব্যাখ্যা সম্পর্কে", _RE_EXPL_SINGLE, _RE_EXPL_NUMBERED, "Explanation") == "ব্যাখ্যা সম্পর্কে"
+
+
+def test_bengali_punishment_phrases_are_bold():
+    from bdlaw_scraper.scraper import _bold_punishment_keywords as bold
+
+    assert bold("যাবজ্জীবন কারাদণ্ডে দণ্ডিত হইবেন") == "**যাবজ্জীবন কারাদণ্ডে** **দণ্ডিত হইবেন**"
+    assert bold("ধারাবাহিক মৃত্যুদণ্ড") == "ধারাবাহিক **মৃত্যুদণ্ড**"
+
+
+def test_bengali_explanation_inside_a_quoted_amendment_is_not_a_callout():
+    from bdlaw_scraper.scraper import _convert_single_callout, _RE_EXPL_NUMBERED, _RE_EXPL_SINGLE
+
+    doc = "প্রতিস্থাপিত হইবে, যথা:- “রেস্তোরাঁ:\nব্যাখ্যা: “রেস্তোরাঁ” অর্থ কোন স্থান”"
+    assert _convert_single_callout(doc, _RE_EXPL_SINGLE, _RE_EXPL_NUMBERED, "Explanation") == doc
