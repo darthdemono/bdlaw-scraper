@@ -2149,7 +2149,10 @@ def _convert_word_ordinals(text: str) -> str:
     def between(a: int, b: int) -> bool:
         # text that ends the series: anything but blanks, callouts and lone footnote references
         return any(
-            l.strip() and not l.startswith(">") and not _RE_LONE_REFS.match(l)
+            l.strip()
+            and not l.startswith(">")
+            and not _RE_LONE_REFS.match(l)
+            and not re.match(r"^\d+\. <!--n:\([b-z]", l)  # (b), (c) of an inline (a)
             for l in lines[a + 1 : b]
         )
 
@@ -2160,7 +2163,23 @@ def _convert_word_ordinals(text: str) -> str:
             if len(run) >= 2:
                 for n, j in enumerate(run, 1):
                     m = _RE_WORD_ITEM.match(lines[j])
-                    out[j] = f"{n}. <!--n:{m.group(2)}--> {m.group(3)}{m.group(1)}"
+                    refs = m.group(1)
+                    content = m.group(3)
+                    sub = re.match(r"^(.*?[-:;,])\s*\(a\)\s+(.*)$", content)
+                    nxt = next((k for k in range(j + 1, len(lines)) if lines[k].strip()), None)
+                    if sub and nxt is not None and re.match(r"^\d+\. <!--n:\([b-z]", lines[nxt]):
+                        # "Twelfth.- Every person- (a) ..." followed by (b), (c): a sub-list under the item
+                        pad = " " * len(f"{n}. ")
+                        out[j] = f"{n}. <!--n:{m.group(2)}--> {sub.group(1)}{refs}\n\n{pad}1. <!--n:(a)--> {sub.group(2)}"
+                        _record_numbering("(a)", 1, 2, "alpha")
+                        k, idx = nxt, 2
+                        while k < len(lines) and (not lines[k].strip() or re.match(r"^\d+\. <!--n:\(", lines[k])):
+                            if lines[k].strip():
+                                out[k] = pad + f"{idx}. " + re.sub(r"^\d+\. ", "", lines[k])
+                                idx += 1
+                            k += 1
+                    else:
+                        out[j] = f"{n}. <!--n:{m.group(2)}--> {content}{refs}"
                     _record_numbering(m.group(2), n, 1, "ordinal_word")
                     if j + 2 < len(lines) and _RE_LONE_REFS.match(lines[j + 2]) and not lines[j + 1].strip():
                         out[j] += lines[j + 2].strip()
@@ -2635,8 +2654,8 @@ def html_to_markdown(
     raw = _convert_margin_callouts(raw)
     raw = _convert_definitions(raw)
     raw = convert_lists(raw)
-    raw = _convert_word_ordinals(raw)
     raw = _wrap_illustrations_callout(raw)
+    raw = _convert_word_ordinals(raw)
     raw = _nest_secondary_callouts(raw)
     raw = _linkify_section_refs(raw, act_number, known_sections)
     if footnote_map:

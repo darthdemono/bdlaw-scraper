@@ -676,3 +676,17 @@ def test_preamble_drops_lone_dash_line():
 
     h = "<div class='preamble-content'><p>Whereas it is expedient;</p><p>-</p></div>"
     assert parse_preamble(BeautifulSoup(h, "html.parser")) == "Whereas it is expedient;"
+
+
+def test_ordinal_item_with_inline_sublist_nests():
+    from bdlaw_scraper.scraper import _convert_word_ordinals
+
+    doc = (
+        "First.-A;\n\nSecond.-Every person- (a) in the Government;\n1. <!--n:(b)--> in a body;\n\n"
+        "Third.-C."
+    )
+    out = _convert_word_ordinals(doc)
+    assert "2. <!--n:Second--> Every person-" in out
+    assert "\n   1. <!--n:(a)--> in the Government;" in out
+    assert "\n   2. <!--n:(b)--> in a body;" in out
+    assert "3. <!--n:Third--> C." in out
