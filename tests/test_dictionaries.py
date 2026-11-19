@@ -86,3 +86,12 @@ def test_act_links_names_and_sections(tmp_path: Path):
     assert links.link("section 3, the Evidence Act, 1872") == "section 3, the [[act-5|Evidence Act, 1872]]"
     assert links.link("Section 99 of the Penal Code, 1860") == "Section 99 of the [[act-9|Penal Code, 1860]]"
     assert links.link("Unknown Act, 1999") == "Unknown Act, 1999"
+
+
+def test_act_titles_with_a_trailing_note_still_link(tmp_path: Path):
+    from bdlaw_scraper.dictionaries import ActLinks
+
+    (tmp_path / "act-7.md").write_text('---\ntitle: "The State Acquisition and Tenancy Act, 1950 (East Bengal Act)"\n---\n')
+    assert ActLinks(tmp_path).link("the State Acquisition and Tenancy Act, 1950 (XXVIII of 1951)") == (
+        "the [[act-7|State Acquisition and Tenancy Act, 1950]] (XXVIII of 1951)"
+    )

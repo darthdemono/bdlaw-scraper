@@ -557,7 +557,7 @@ class ActLinks:
                 head = [next(fh, "") for _ in range(4)]
             m = next((re.match(r'title:\s*"?(.*?)"?\s*$', l) for l in head if l.startswith("title:")), None)
             if m:
-                self.by_key.setdefault(_name_key(m.group(1)), set()).add(f.stem)
+                self.by_key.setdefault(_name_key(re.sub(r"(\b(?:1[6-9]|20)\d\d)\b.*", r"\1", m.group(1))), set()).add(f.stem)  # "…Act, 1950 (East Bengal Act)" -> "…Act, 1950"
         self._text: dict[str, str] = {}
 
     def _has_anchor(self, act: str, anchor: str) -> bool:
