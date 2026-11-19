@@ -9,6 +9,9 @@
 
 - Dictionary pages (Law Dictionary, Glossary, Latin Terms) are written A to Z with one section and table per letter. Source citations, such as `[Wilson’s Glossary]` and case references in parentheses, are moved out of the definitions into footnotes. `bdlaw-dictionaries --reformat FILE -c NAME` re-renders an older table file offline.
 
+- Acts named in dictionary footnotes ("the Penal Code, 1860") become `[[act-N|…]]` wikilinks, and a section named just before them links to that section's block anchor. This needs `bdlaw-dictionaries --acts-dir <folder of act-N.md>`; a name links only when exactly one act has it.
+- Dictionary entries whose terms differ only in case or punctuation are merged. Identical or wholly contained definitions collapse; definitions that really differ are all kept in one entry.
+
 ### Fixed
 
 - Cross-references to several sections at once ("sections 64, 65, 66 and 445") only linked the first number. Every known section in the list is now linked; a quantity after "and" ("sections 3 and 4 years") is left alone.
