@@ -243,15 +243,43 @@ def build_entries(pdf: Path) -> list[Entry]:
     return assign_sections(entries)
 
 
+# HTML language tag and writing direction of a recognised word, from its script and the book's language code
+_SCRIPT_LANG = [
+    ("\u0600", "\u06ff", {"A": "ar", "P": "fa"}, "ur", "rtl"), ("\u0750", "\u077f", {"A": "ar", "P": "fa"}, "ur", "rtl"),
+    ("\ufb50", "\ufeff", {"A": "ar", "P": "fa"}, "ur", "rtl"),
+    ("\u0900", "\u097f", {"S": "sa", "Mar": "mr", "Mahr": "mr"}, "hi", "ltr"), ("\u0980", "\u09ff", {}, "bn", "ltr"),
+    ("\u0a80", "\u0aff", {}, "gu", "ltr"), ("\u0b00", "\u0b7f", {}, "or", "ltr"), ("\u0b80", "\u0bff", {}, "ta", "ltr"),
+    ("\u0c00", "\u0c7f", {}, "te", "ltr"), ("\u0c80", "\u0cff", {}, "kn", "ltr"), ("\u0d00", "\u0d7f", {}, "ml", "ltr"),
+]
+
+
+def native_span(text: str, code: str) -> str:
+    """The recognised word as an HTML span with its language and direction, so fonts and readers pick it up."""
+    first = next((c for c in text if c.isalpha()), "")
+    for lo, hi, by_code, default, direction in _SCRIPT_LANG:
+        if lo <= first <= hi:
+            return f'<span lang="{by_code.get(code, default)}" dir="{direction}">{html.escape(text)}</span>'
+    return html.escape(text)
+
+
+def apply_native(entries: list[Entry], recognised: dict[tuple[int, int], str]) -> None:
+    """Attach recognised words ((entry index, word index) -> text) to the entries' native groups."""
+    for i, e in enumerate(entries):
+        for j, n in enumerate(e.native):
+            if recognised.get((i, j)):
+                n["text"] = recognised[(i, j)]
+
+
 def render_markdown(entries: list[Entry], section: str = "glossary") -> str:
-    """A to Z markdown of one section. Native-script groups are marked as pending until they are recognised."""
+    """A to Z markdown of one section. Recognised native words become language-tagged spans, the rest stay marked as unread."""
     body: dict[str, list[str]] = {}
     for e in entries:
         if e.section != section:
             continue
         text = e.text
         for n in e.native:
-            text = text.replace("⟦native⟧", f"[native {LANG_CODES.get(n['lang'], n['lang'] or '?')}]", 1)
+            shown = native_span(n["text"], n["lang"]) if n.get("text") else f"[unread {LANG_CODES.get(n['lang'], n['lang'] or '?')}]"
+            text = text.replace("⟦native⟧", shown, 1)
         head = re.match(re.escape(e.term), text)
         text = f"**{e.term}**" + text[head.end():] if head else text
         letter = e.term[:1].upper() if e.term[:1].isalpha() else "#"
@@ -266,9 +294,13 @@ def render_markdown(entries: list[Entry], section: str = "glossary") -> str:
 @click.option("--pdf", required=True, type=click.Path(exists=True, dir_okay=False), help="The scanned book with its OCR text layer.")
 @click.option("--output-json", required=True, type=click.Path(), help="Where the entries are written.")
 @click.option("--output-md", default=None, type=click.Path(), help="Also write the glossary section as markdown.")
-def main(pdf: str, output_json: str, output_md: Optional[str]) -> None:
+@click.option("--native", default=None, type=click.Path(exists=True), help="JSON lines from bdlaw-wilson-native to fill the native-script words.")
+def main(pdf: str, output_json: str, output_md: Optional[str], native: Optional[str]) -> None:
     """Rebuild Wilson's glossary entries from the PDF text layer."""
     entries = build_entries(Path(pdf))
+    if native:
+        rows = (json.loads(l) for l in Path(native).read_text(encoding="utf-8").splitlines())
+        apply_native(entries, {tuple(r["key"]): r["text"] for r in rows if r["status"] == "ok"})
     Path(output_json).write_text(json.dumps([asdict(e) for e in entries], ensure_ascii=False, indent=1), encoding="utf-8")
     if output_md:
         Path(output_md).write_text(render_markdown(entries), encoding="utf-8")

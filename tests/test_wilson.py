@@ -67,3 +67,14 @@ def test_locate_native_boxes():
     native = [{"raw": "i_jU", "lang": "H"}]
     locate_native(native, group, 35)
     assert native[0]["page"] == 35 and native[0]["boxes"] == [[42, 20, 70, 29]]
+
+
+def test_native_words_render_as_language_tagged_spans():
+    from bdlaw_scraper.wilson import Entry, apply_native, render_markdown
+
+    e = Entry(35, 0, "Abdi", ["Hindustani"], "Abdi, H. (⟦native⟧) Patrimonial", [{"raw": "x", "lang": "H"}], True)
+    apply_native([e], {(0, 0): "آبدار"})
+    out = render_markdown([e])
+    assert '<span lang="ur" dir="rtl">آبدار</span>' in out
+    e.native[0].pop("text")
+    assert "[unread Hindustani]" in render_markdown([e])
