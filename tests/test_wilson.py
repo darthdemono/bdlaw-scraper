@@ -57,3 +57,52 @@ def test_markdown_groups_by_letter_and_marks_native_words():
     md = render_markdown([e])
     assert md.startswith("## A") and "**ABAD**, H. (A. [native Arabic])" not in md or "[native" in md
     assert "**ABAD**" in md
+
+
+def test_locate_native_boxes():
+    from bdlaw_scraper.wilson import Line, locate_native
+
+    words = [("Abdi,", 10, 20, 30, 29), ("H.", 32, 20, 40, 29), ("(i_jU)", 42, 20, 70, 29), ("Patrimonial", 72, 20, 120, 29)]
+    group = [Line(0, 20, 10, "Abdi, H. (i_jU) Patrimonial", words)]
+    native = [{"raw": "i_jU", "lang": "H"}]
+    locate_native(native, group, 35)
+    assert native[0]["page"] == 35 and native[0]["boxes"] == [[42, 20, 70, 29]]
+
+
+def test_native_words_render_as_language_tagged_spans():
+    from bdlaw_scraper.wilson import Entry, apply_native, render_markdown
+
+    e = Entry(35, 0, "Abdi", ["Hindustani"], "Abdi, H. (⟦native⟧) Patrimonial", [{"raw": "x", "lang": "H", "page": 35, "boxes": [[1.0, 2.0, 3.0, 4.0]]}], True)
+    apply_native([e], {"35:1.0:2.0": "آبدار"})
+    out = render_markdown([e])
+    assert '<span lang="ur" dir="rtl">آبدار</span>' in out
+    e.native[0].pop("text")
+    assert "[unread Hindustani]" in render_markdown([e])
+
+
+def test_match_score_flags_words_that_do_not_match_the_latin_headword():
+    from bdlaw_scraper.wilson import match_score
+
+    assert match_score("Chulat, Mar.", "चुलत") >= 70
+    assert match_score("Abdi, H.", "नमूना") < 40
+
+
+def test_notes_split_by_letter_and_see_links_resolve():
+    from bdlaw_scraper.wilson import Entry, render_notes
+
+    a = Entry(40, 0, "ABDAR", ["Hindustani"], "ABDAR, H. A servant. See Adasatta and Zeta.", [], True)
+    b = Entry(41, 0, "ADASATTA", [], "ADASATTA, H. An estimate.", [], True)
+    notes = render_notes([a, b])
+    assert set(notes) == {"A.md", "index.md"}
+    assert "[[Wilson Glossary/A#^w1|Adasatta]]" in notes["A.md"] and "Zeta" in notes["A.md"] and "[[Wilson Glossary/A#^w0|Zeta" not in notes["A.md"]
+    assert "^w0" in notes["A.md"] and "generated: true" in notes["A.md"]
+
+
+def test_fold_fragments_joins_lowercase_pieces_to_the_entry_before():
+    from bdlaw_scraper.wilson import Entry, fold_fragments
+
+    a = Entry(40, 0, "KARZ", [], "KARZ, H. A debt, a loan,", [], True)
+    b = Entry(40, 0, "money lent", [], "money lent at interest.", [{"raw": "x", "lang": "H"}], False)
+    c = Entry(40, 0, "Karzi", [], "Karzi, H. Indebted.", [], False)
+    out = fold_fragments([a, b, c])
+    assert [e.term for e in out] == ["KARZ", "Karzi"] and out[0].text.endswith("money lent at interest.") and len(out[0].native) == 1

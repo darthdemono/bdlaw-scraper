@@ -22,7 +22,9 @@ dependencies = [
 
 [project.optional-dependencies]
 translate = ["ctranslate2>=4.0", "transformers>=4.40", "huggingface_hub>=0.23", "sentencepiece>=0.2"]
-dev = ["pytest>=8.0"]
+wilson = ["indic-transliteration>=2.3", "rapidfuzz>=3.0"]
+ocr = ["surya-ocr>=0.17", "pillow>=10"]
+dev = ["pytest>=8.0", "indic-transliteration>=2.3", "rapidfuzz>=3.0", "pillow>=10"]
 
 [project.urls]
 Homepage = "https://github.com/darthdemono/bdlaw-scraper"
@@ -35,6 +37,7 @@ bdlaw-translate = "bdlaw_scraper.translate:main"
 bdlaw-pdf2md = "bdlaw_scraper.pdf2md:main"
 bdlaw-terms = "bdlaw_scraper.terms:main"
 bdlaw-wilson = "bdlaw_scraper.wilson:main"
+bdlaw-wilson-native = "bdlaw_scraper.wilson_native:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
