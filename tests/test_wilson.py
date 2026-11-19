@@ -57,3 +57,13 @@ def test_markdown_groups_by_letter_and_marks_native_words():
     md = render_markdown([e])
     assert md.startswith("## A") and "**ABAD**, H. (A. [native Arabic])" not in md or "[native" in md
     assert "**ABAD**" in md
+
+
+def test_locate_native_boxes():
+    from bdlaw_scraper.wilson import Line, locate_native
+
+    words = [("Abdi,", 10, 20, 30, 29), ("H.", 32, 20, 40, 29), ("(i_jU)", 42, 20, 70, 29), ("Patrimonial", 72, 20, 120, 29)]
+    group = [Line(0, 20, 10, "Abdi, H. (i_jU) Patrimonial", words)]
+    native = [{"raw": "i_jU", "lang": "H"}]
+    locate_native(native, group, 35)
+    assert native[0]["page"] == 35 and native[0]["boxes"] == [[42, 20, 70, 29]]

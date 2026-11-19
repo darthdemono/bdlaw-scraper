@@ -33,6 +33,7 @@ import click
 _RE_LINE = re.compile(r'<line xMin="([\d.]+)" yMin="([\d.]+)" xMax="([\d.]+)" yMax="([\d.]+)">(.*?)</line>', re.S)
 _RE_PAGE = re.compile(r'<page width="([\d.]+)" height="([\d.]+)">(.*?)</page>', re.S)
 _RE_WORD = re.compile(r">([^<]*)</word>")
+_RE_WORD_BOX = re.compile(r'<word xMin="([\d.]+)" yMin="([\d.]+)" xMax="([\d.]+)" yMax="([\d.]+)">([^<]*)</word>')
 
 # language codes Wilson prints after a headword: "KARZ, H.", "Karjkari, Mar.", "(A. ...)"
 LANG_CODES = {
@@ -55,7 +56,8 @@ class Entry:
     term: str
     languages: list[str]
     text: str  # Latin text of the entry with native-script groups replaced by ⟦native⟧
-    native: list[dict] = field(default_factory=list)  # {"raw": garbled OCR, "lang": code before it}
+    # {"raw": garbled OCR, "lang": code before it, "page": n, "boxes": [[x0, y0, x1, y1], ...] in PDF points, one per printed line}
+    native: list[dict] = field(default_factory=list)
     main: bool = False  # small-caps main headword (True) or italic sub-entry (False)
     section: str = "glossary"  # glossary (A to Z), supplement (a second A to Z), index (word and page list)
 
@@ -66,6 +68,7 @@ class Line:
     y: float
     x: float
     text: str
+    words: list = field(default_factory=list)  # (text, x0, y0, x1, y1) of every word on the line
 
 
 def read_pages(pdf: Path) -> list[tuple[float, float, list[Line]]]:
@@ -78,9 +81,10 @@ def read_pages(pdf: Path) -> list[tuple[float, float, list[Line]]]:
         width = float(w)
         lines = []
         for x0, y0, _x1, _y1, inner in _RE_LINE.findall(body):
+            words = [(html.unescape(t), float(a), float(b), float(c), float(d)) for a, b, c, d, t in _RE_WORD_BOX.findall(inner)]
             text = html.unescape(" ".join(_RE_WORD.findall(inner))).strip()
             if text:
-                lines.append(Line(0 if float(x0) < width / 2 else 1, float(y0), float(x0), text))
+                lines.append(Line(0 if float(x0) < width / 2 else 1, float(y0), float(x0), text, words))
         pages.append((width, float(h), lines))
     return pages
 
@@ -92,9 +96,9 @@ def merge_baselines(lines: list[Line], tol: float = 3.0) -> list[Line]:
         col_lines = sorted((l for l in lines if l.column == col), key=lambda l: (l.y, l.x))
         for l in col_lines:
             if out and out[-1].column == col and abs(out[-1].y - l.y) <= tol:
-                out[-1] = Line(col, out[-1].y, out[-1].x, out[-1].text + " " + l.text)
+                out[-1] = Line(col, out[-1].y, out[-1].x, out[-1].text + " " + l.text, out[-1].words + l.words)
             else:
-                out.append(Line(col, l.y, l.x, l.text))
+                out.append(Line(col, l.y, l.x, l.text, l.words))
     return out
 
 
@@ -151,6 +155,26 @@ def _native_groups(text: str) -> tuple[str, list[dict]]:
         return f"({lead.group(0)} ⟦native⟧)" if lead else "(⟦native⟧)"
 
     return re.sub(r"\(([^()]*(?:\([^()]*\)[^()]*)?)\)", sub, text), native
+
+
+def locate_native(native: list[dict], group: list[Line], page: int) -> None:
+    """Give each native group the page and the box of its words, found by searching its OCR text in the entry's words."""
+    flat = [(w, i) for i, l in enumerate(group) for w in l.words]
+    joined, starts = "", []
+    for w, _ in flat:
+        starts.append(len(joined))
+        joined += w[0] + " "
+    cursor = 0
+    for n in native:
+        n["page"], n["boxes"] = page, []
+        at = joined.find(n["raw"].strip(), cursor)
+        if at < 0 or not n["raw"].strip():
+            continue
+        cursor = at + len(n["raw"])
+        hit = [flat[k] for k, st in enumerate(starts) if st < cursor and st + len(flat[k][0][0]) > at]
+        for line in dict.fromkeys(i for _, i in hit):
+            ws = [w for w, i in hit if i == line]
+            n["boxes"].append([round(min(w[1] for w in ws), 1), round(min(w[2] for w in ws), 1), round(max(w[3] for w in ws), 1), round(max(w[4] for w in ws), 1)])
 
 
 def parse_entry(text: str, page: int, column: int, main: bool) -> Optional[Entry]:
@@ -210,6 +234,7 @@ def build_entries(pdf: Path) -> list[Entry]:
             e = parse_entry(join_lines(group), pno, group[0].column, main=bool(re.match(r"^[A-ZÁÍÚÉÓ][A-ZÁÍÚÉÓ'’\-]{2,}", first)))
             if e is None:
                 continue
+            locate_native(e.native, group, pno)
             if group[0].text.startswith("→") and entries:  # continues the previous entry
                 entries[-1].text += " " + e.text
                 entries[-1].native += e.native
