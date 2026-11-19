@@ -490,6 +490,117 @@ def _sort_key(term: str) -> str:
     return re.sub(r"^[^A-Za-z0-9]+", "", term).casefold()
 
 
+def _term_key(term: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", term.lower()).strip()
+
+
+def merge_duplicates(entries: list[Entry]) -> list[Entry]:
+    """Merge entries whose terms differ only in case or punctuation.
+
+    Identical definitions collapse to one. A definition that is wholly
+    contained in another is dropped. Definitions that really differ are all
+    kept, in one entry, separated by a blank line (<br><br>).
+    """
+    groups: dict[str, list[Entry]] = {}
+    for e in entries:
+        groups.setdefault(_term_key(e.term), []).append(e)
+    merged = []
+    for group in groups.values():
+        first = group[0]
+        parts: list[str] = []
+        for e in group:
+            d = " ".join(e.definition.split())
+            if any(d in p for p in parts):
+                continue
+            parts = [p for p in parts if p not in d] + [d]
+        term = first.term.rstrip(" :")
+        merged.append(Entry(first.id, term, "<br><br>".join(parts), first.category))
+    return merged
+
+
+_RE_YEAR = re.compile(r"\b(1[6-9]\d\d|20\d\d)\b")
+_RE_SECTION_BEFORE = re.compile(
+    r"(?i)\b((?:sections?|articles?|rules?)\s+)(\d+[A-Za-z]{0,2}(?:\s*\([^()]*\))*"
+    r"(?:\s*(?:,|and|&)\s*\d+[A-Za-z]{0,2}(?:\s*\([^()]*\))*)*)[\s,;]*(?:of\s+)?(?:the\s+)?$"
+)
+_RE_NUM = re.compile(r"(\d+[A-Za-z]{0,2})((?:\s*\([^()]*\))*)")
+
+
+def _name_key(name: str) -> str:
+    name = name.replace("&", " and ").replace("\u2019", "'")
+    name = re.sub(r"^the\s+", "", name.strip(), flags=re.I)
+    name = re.sub(r"[^a-z0-9]+", " ", name.lower()).strip()
+    name = " ".join(w[:-1] if len(w) > 3 and w.endswith("s") else w for w in name.split())  # Instrument/Instruments
+    return _ALIASES.get(name, name)
+
+
+# How the dictionaries write a few common acts versus their official titles
+_ALIASES = {
+    "criminal procedure code 1898": "code of criminal procedure 1898",
+    "civil procedure code 1908": "code of civil procedure 1908",
+}
+
+
+class ActLinks:
+    """Resolves act names found in footnotes to the act files of a vault.
+
+    Built from the `title:` line of each act-N.md in acts_dir. A name only
+    links when exactly one act has it. A section named just before the act
+    links to that section's block anchor, when the act file really has it.
+    """
+
+    def __init__(self, acts_dir: Path) -> None:
+        self.dir = Path(acts_dir)
+        self.by_key: dict[str, set[str]] = {}
+        for f in self.dir.glob("act-*.md"):
+            with f.open(encoding="utf-8") as fh:
+                head = [next(fh, "") for _ in range(4)]
+            m = next((re.match(r'title:\s*"?(.*?)"?\s*$', l) for l in head if l.startswith("title:")), None)
+            if m:
+                self.by_key.setdefault(_name_key(m.group(1)), set()).add(f.stem)
+        self._text: dict[str, str] = {}
+
+    def _has_anchor(self, act: str, anchor: str) -> bool:
+        if act not in self._text:
+            self._text[act] = (self.dir / f"{act}.md").read_text(encoding="utf-8")
+        return bool(anchor) and re.search(rf"\^sec-{anchor}(?![a-z0-9])", self._text[act]) is not None
+
+    def _sections(self, before: str, act: str) -> str:
+        m = _RE_SECTION_BEFORE.search(before)
+        if not m:
+            return before
+        from .scraper import _secnum_to_block_id
+
+        def link(n: re.Match) -> str:
+            anchor = _secnum_to_block_id(n.group(1))
+            if not self._has_anchor(act, anchor):
+                return n.group(0)
+            return f"[[{act}#^sec-{anchor}|{n.group(0)}]]"
+
+        return before[: m.start()] + m.group(1) + _RE_NUM.sub(link, m.group(2)) + before[m.end(2) :]
+
+    def link(self, note: str) -> str:
+        """Wikilink every act named in a footnote (and the section before it)."""
+        out, pos = [], 0
+        for ym in _RE_YEAR.finditer(note):
+            if ym.start() < pos:
+                continue
+            words = list(re.finditer(r"[^\s,;]+", note[max(pos, ym.start() - 160) : ym.start()]))
+            base = max(pos, ym.start() - 160)
+            for k in range(min(len(words), 14), 0, -1):
+                start = base + words[-k].start()
+                if note[start : start + 4].lower() == "the ":
+                    continue
+                acts = self.by_key.get(_name_key(note[start : ym.end()]))
+                if acts and len(acts) == 1:
+                    act = next(iter(acts))
+                    out.append(self._sections(note[pos:start], act))
+                    out.append(f"[[{act}|{note[start:ym.end()]}]]")
+                    pos = ym.end()
+                    break
+        return "".join(out) + note[pos:]
+
+
 def read_table_entries(path: Path) -> list[Entry]:
     """Read entries back from an older two-column Term | Definition table."""
     rows = [l for l in path.read_text(encoding="utf-8").split("\n") if l.startswith("|")][2:]
@@ -501,7 +612,9 @@ def read_table_entries(path: Path) -> list[Entry]:
     return entries
 
 
-def write_markdown(entries: list[Entry], config: dict, output_path: Path) -> None:
+def write_markdown(
+    entries: list[Entry], config: dict, output_path: Path, acts: Optional[ActLinks] = None
+) -> None:
     """Write entries as an Obsidian-compatible page, A to Z.
 
     Layout: YAML frontmatter, a jump line, then one section per initial
@@ -515,6 +628,7 @@ def write_markdown(entries: list[Entry], config: dict, output_path: Path) -> Non
     """
     title = config["title"]
     source_url = config["url_template"].replace("/{id}.html", "/")
+    entries = merge_duplicates(entries)
     notes: list[str] = []
     sections: dict[str, list[tuple[str, str]]] = {}
     for e in sorted(entries, key=lambda e: _sort_key(e.term)):
@@ -543,7 +657,7 @@ def write_markdown(entries: list[Entry], config: dict, output_path: Path) -> Non
         lines += [f"## {k}", "", "| Term | Definition |", "| --- | --- |"]
         lines += [f"| **{t.replace('|', chr(92) + '|')}** | {d.replace('|', chr(92) + '|')} |" for t, d in sections[k]]
         lines.append("")
-    lines += [f"[^{i}]: {n}" for i, n in enumerate(notes, 1)]
+    lines += [f"[^{i}]: {acts.link(n) if acts else n}" for i, n in enumerate(notes, 1)]
 
     tmp = output_path.with_suffix(".md.tmp")
     tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -622,6 +736,12 @@ def write_markdown(entries: list[Entry], config: dict, output_path: Path) -> Non
     help="Ignore disk cache and fetch live pages.",
 )
 @click.option(
+    "--acts-dir",
+    type=click.Path(exists=True, file_okay=False),
+    default=None,
+    help="Folder of act-N.md files. Acts named in footnotes become [[wikilinks]] to them.",
+)
+@click.option(
     "--reformat",
     type=click.Path(exists=True, dir_okay=False),
     default=None,
@@ -647,6 +767,7 @@ def main(
     from_id: int,
     skip_existing: bool,
     force_refresh: bool,
+    acts_dir: Optional[str],
     reformat: Optional[str],
     verbose: bool,
 ) -> None:
@@ -672,12 +793,13 @@ def main(
     out_path.mkdir(parents=True, exist_ok=True)
     cache_path = Path(cache_dir) if cache_dir else None
 
+    acts = ActLinks(Path(acts_dir)) if acts_dir else None
     if reformat:
         if collection == "all":
             raise click.UsageError("--reformat needs a single --collection")
         cfg = COLLECTIONS[collection]
         entries = read_table_entries(Path(reformat))
-        write_markdown(entries, cfg, out_path / cfg["output"])
+        write_markdown(entries, cfg, out_path / cfg["output"], acts)
         log.info("Reformatted %d entries from %s", len(entries), reformat)
         return
 
@@ -708,7 +830,7 @@ def main(
                 log=log,
                 from_id=from_id,
             )
-            write_markdown(entries, cfg, dest)
+            write_markdown(entries, cfg, dest, acts)
             log.info("✅  %s → %s  (%d entries)", name, dest, len(entries))
         except KeyboardInterrupt:
             log.warning("Interrupted — partial output may have been written.")

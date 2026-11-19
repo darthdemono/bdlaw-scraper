@@ -52,3 +52,37 @@ def test_write_markdown_sorts_and_lists_footnotes(tmp_path: Path):
     assert "| **alpha** | One.[^1] |" in text
     assert text.rstrip().endswith("[^2]: Src B")
     assert read_table_entries(out)[0].term == "**alpha**"
+
+
+def test_merge_duplicates_keeps_different_definitions():
+    from bdlaw_scraper.dictionaries import merge_duplicates
+
+    out = merge_duplicates(
+        [
+            Entry(1, "Fact", "A fact is a thing."),
+            Entry(2, "Fact:", "A fact is a thing. More."),
+            Entry(3, "Good faith", "One."),
+            Entry(4, "Good Faith", "Two."),
+            Entry(5, "Same", "x"),
+            Entry(6, "same", "x"),
+        ]
+    )
+    by = {e.term: e.definition for e in out}
+    assert by["Fact"] == "A fact is a thing. More."
+    assert by["Good faith"] == "One.<br><br>Two."
+    assert by["Same"] == "x" and len(out) == 3
+
+
+def test_act_links_names_and_sections(tmp_path: Path):
+    from bdlaw_scraper.dictionaries import ActLinks
+
+    (tmp_path / "act-5.md").write_text('---\ntitle: "The Evidence Act, 1872"\n---\nx ^sec-30\n')
+    (tmp_path / "act-9.md").write_text('---\ntitle: "The Penal Code, 1860"\n---\nx\n')
+    links = ActLinks(tmp_path)
+    assert links.link("See, section 30, the Evidence Act, 1872 (Act No. I of 1872)") == (
+        "See, section [[act-5#^sec-30|30]], the [[act-5|Evidence Act, 1872]] (Act No. I of 1872)"
+    )
+    # section 3 is not an anchor (only ^sec-30 is): the act links, the section does not
+    assert links.link("section 3, the Evidence Act, 1872") == "section 3, the [[act-5|Evidence Act, 1872]]"
+    assert links.link("Section 99 of the Penal Code, 1860") == "Section 99 of the [[act-9|Penal Code, 1860]]"
+    assert links.link("Unknown Act, 1999") == "Unknown Act, 1999"
