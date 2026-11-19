@@ -38,6 +38,7 @@ bdlaw-pdf2md = "bdlaw_scraper.pdf2md:main"
 bdlaw-terms = "bdlaw_scraper.terms:main"
 bdlaw-wilson = "bdlaw_scraper.wilson:main"
 bdlaw-wilson-native = "bdlaw_scraper.wilson_native:main"
+bdlaw-wilson-lines = "bdlaw_scraper.wilson_lines:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
