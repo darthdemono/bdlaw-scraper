@@ -1097,6 +1097,7 @@ def _clean_heading(raw: str) -> str:
         h = h[1:-1].strip()
     h = re.sub(r"^\[\d+\]\s*", "", h)
     h = re.sub(r"\[\s*\*\s*\*\s*\*\s*\]", "[ * * * ]", h)  # omission mark, as in the body
+    h = re.sub(r"\[\s*([^\[\]*^]*?)\s*\]", r"\1", h)  # amendment brackets inside a title
     h = re.sub(r"^[A-Za-z0-9]+(?:-[A-Za-z0-9]+)?(?:\.[A-Za-z0-9]+)?\.\s+", "", h)
     return h.strip() + "".join(f"[^{n}]" for n in dict.fromkeys(refs))
 
@@ -1162,6 +1163,8 @@ def parse_preamble(soup: BeautifulSoup) -> str:
     raw = re.sub(r"\n{3,}", "\n\n", "\n".join(joined)).strip()
     if raw.startswith("[") and "]" not in raw.split("\n")[0]:
         raw = raw[1:].lstrip()
+    # a lone "-" or ":" line under text would turn that text into a heading
+    raw = "\n".join(l for l in raw.split("\n") if not re.fullmatch(r"\s*[-:=\u2013\u2014]+\s*", l))
     # a reference alone on its line belongs to the line after it, as a trailing mark
     raw = re.sub("^\u27e6(\\d+)\u27e7\n([^\n]+)", "\\2\u27e6\\1\u27e7", raw, flags=re.M)
     return re.sub("\u27e6(\\d+)\u27e7", r"[^\1]", raw)
@@ -2093,6 +2096,84 @@ def _convert_single_callout(
     return "\n".join(out)
 
 
+_RE_CALLOUT_ITEM = re.compile(r"^((?:> )+)(\d+)\. (<!--n:)")
+
+
+def _restart_callout_lists(text: str) -> str:
+    """Number each list inside a callout from 1.
+
+    Items carry the section's running count ("5. (a) ..."). A list that does not start at 1 cannot
+    interrupt a paragraph, so an Illustrations list straight after its heading rendered as plain text.
+    The shown marker is the "<!--n:-->" comment, so the digit itself is free to change.
+
+    @param text  Rendered section or document text.
+    @return      Text with callout list items numbered from 1 per list.
+    """
+    out: list[str] = []
+    prefix, count = "", 0
+    for line in text.split("\n"):
+        m = _RE_CALLOUT_ITEM.match(line)
+        if m:
+            count = count + 1 if m.group(1) == prefix else 1
+            prefix = m.group(1)
+            line = f"{prefix}{count}. {line[m.end(2) + 2:]}"
+        elif not line.startswith(prefix) or not line.strip(">  "):
+            prefix, count = "", 0
+        out.append(line)
+    return "\n".join(out)
+
+
+_ORDINAL_ITEM_WORDS = (
+    "First Second Third Fourth Fifth Sixth Seventh Eighth Ninth Tenth Eleventh Twelfth "
+    "Thirteenth Fourteenth Fifteenth Sixteenth Seventeenth Eighteenth Nineteenth Twentieth"
+).split()
+_RE_WORD_ITEM = re.compile(r"^((?:\[\^\d+\])*)(" + "|".join(_ORDINAL_ITEM_WORDS) + r")(?:\s*\.\s*-*|\s*-+)\s*(\S.*)$")
+
+
+_RE_LONE_REFS = re.compile(r"^\s*(?:\[\^\d+\])+\s*$")
+
+
+def _convert_word_ordinals(text: str) -> str:
+    """Turn "First.- ...", "Second. ..." paragraphs into a list that shows the word as its marker.
+
+    Needs at least two such lines in a row (blank lines between them allowed), so a sentence that
+    merely starts with "First." is left alone.
+
+    @param text  Section text after list conversion.
+    @return      Text with ordinal-word runs rewritten as list items.
+    """
+    lines = text.split("\n")
+    hits = [i for i, l in enumerate(lines) if _RE_WORD_ITEM.match(l)]
+    out = list(lines)
+
+    def between(a: int, b: int) -> bool:
+        # text that ends the series: anything but blanks, callouts and lone footnote references
+        return any(
+            l.strip() and not l.startswith(">") and not _RE_LONE_REFS.match(l)
+            for l in lines[a + 1 : b]
+        )
+
+    run: list[int] = []
+    for i in hits + [None]:
+        restart = i is not None and _RE_WORD_ITEM.match(lines[i]).group(2) == "First"  # a new series begins
+        if run and (i is None or restart or between(run[-1], i)):
+            if len(run) >= 2:
+                for n, j in enumerate(run, 1):
+                    m = _RE_WORD_ITEM.match(lines[j])
+                    out[j] = f"{n}. <!--n:{m.group(2)}--> {m.group(3)}{m.group(1)}"
+                    _record_numbering(m.group(2), n, 1, "ordinal_word")
+                    if j + 2 < len(lines) and _RE_LONE_REFS.match(lines[j + 2]) and not lines[j + 1].strip():
+                        out[j] += lines[j + 2].strip()
+                        out[j + 2] = ""
+                    elif j + 1 < len(lines) and _RE_LONE_REFS.match(lines[j + 1]):
+                        out[j] += lines[j + 1].strip()
+                        out[j + 1] = ""
+            run = []
+        if i is not None:
+            run.append(i)
+    return "\n".join(out)
+
+
 def _wrap_illustrations_callout(text: str) -> str:
     """Wrap "Illustration(s)—" header and its following lines in an Obsidian callout.
 
@@ -2554,6 +2635,7 @@ def html_to_markdown(
     raw = _convert_margin_callouts(raw)
     raw = _convert_definitions(raw)
     raw = convert_lists(raw)
+    raw = _convert_word_ordinals(raw)
     raw = _wrap_illustrations_callout(raw)
     raw = _nest_secondary_callouts(raw)
     raw = _linkify_section_refs(raw, act_number, known_sections)
@@ -2895,12 +2977,20 @@ def build_markdown(
 
         elif isinstance(node, PartItem):
             lines.append("")
-            lines.append(f"## [{_fix_omission_marks(node.name)}]({node.url})")
+            name = _fix_omission_marks(node.name)
+            if node.url in ("", "#") and "[" in name:
+                lines.append(f"## {name}")  # a footnote reference inside a link label does not parse
+            else:
+                lines.append(f"## [{name}]({node.url})")
             lines.append("")
 
         elif isinstance(node, ChapterItem):
             lines.append("")
-            lines.append(f"### [{_fix_omission_marks(node.name)}]({node.url})")
+            name = _fix_omission_marks(node.name)
+            if node.url in ("", "#") and "[" in name:
+                lines.append(f"### {name}")  # a footnote reference inside a link label does not parse
+            else:
+                lines.append(f"### [{name}]({node.url})")
             lines.append("")
 
         elif isinstance(node, SubChapterItem):
@@ -2952,7 +3042,11 @@ def build_markdown(
                 block_suffix = f" {block_id}" if block_id else ""
                 lines.append("")
                 heading_text = _RE_LINK_LOOKALIKE.sub(r"\\[\1\\](", heading_text)
-                lines.append(f"{level} [{heading_text}]({node.url}){block_suffix}")
+                if node.url in ("", "#") and "[" in heading_text:
+                    # a link to nowhere; a footnote reference inside its label stops it parsing
+                    lines.append(f"{level} {heading_text}{block_suffix}")
+                else:
+                    lines.append(f"{level} [{heading_text}]({node.url}){block_suffix}")
                 if node.url and node.url != "#":
                     lines.append(f"<!-- url: {node.url} -->")
                 lines.append("")
@@ -2969,7 +3063,7 @@ def build_markdown(
             lines.append(body)
             lines.append("")
 
-    text = _plain_undefined_refs("\n".join(lines))
+    text = _restart_callout_lists(_plain_undefined_refs("\n".join(lines)))
     return _final_cleanup(text)
 
 
