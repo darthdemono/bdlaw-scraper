@@ -14,6 +14,8 @@
 
 - The dictionary pages carry a `## Footnotes` heading before their footnote definitions, as the acts do. The site drops it and prints its own footnote label.
 
+- Act titles that end in a note ("…Act, 1950 (East Bengal Act)") now match footnote references to the plain name.
+
 ### Fixed
 
 - Cross-references to several sections at once ("sections 64, 65, 66 and 445") only linked the first number. Every known section in the list is now linked; a quantity after "and" ("sections 3 and 4 years") is left alone.
