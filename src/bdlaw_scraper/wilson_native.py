@@ -61,7 +61,11 @@ def tesseract(image_path: str, scripts: list[str]) -> str:
     out = subprocess.run(
         ["tesseract", image_path, "-", "-l", "+".join(SCRIPTS[s][1] for s in scripts), "--psm", "7"],
         capture_output=True, text=True,
-    ).stdout
+    )
+    if out.returncode:
+        click.echo(f"tesseract failed ({out.returncode}): {out.stderr.strip()[:200]}", err=True)  # a failed run is not an unreadable word
+        return ""
+    out = out.stdout
     return script_text(out, scripts)
 
 

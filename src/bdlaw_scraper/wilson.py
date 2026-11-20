@@ -290,9 +290,25 @@ def split_runons(text: str, native: list[dict]) -> list[tuple[str, list[dict]]]:
     out, k = [], 0
     for part in parts:
         n = part.count("⟦native⟧")
-        out.append((part, native[k : k + n]))
+        got = native[k : k + n]
         k += n
+        if out and not _has_definition(out[-1][0]):  # variants of one headword each carry a code and a native word: one entry
+            out[-1] = (out[-1][0] + " " + part, out[-1][1] + got)
+        else:
+            out.append((part, got))
     return out
+
+
+_FILLER = {"and", "or", "also", "corruptly", "erroneously", "for", "the", "of", "in", "with", "see", "vulgarly", "properly"}
+
+
+def _has_definition(part: str) -> bool:
+    """False for a chunk that ends right after the native word of its language code: it is a headword with no meaning yet."""
+    if not part.rstrip(" .,;").endswith(")") and not part.rstrip().endswith("⟦native⟧"):
+        return True
+    outside = re.sub(r"\([^()]*(?:\([^()]*\)[^()]*)*\)", " ", part)
+    words = [w for w in re.findall(r"\b[a-z]{2,}\b", outside) if w not in _FILLER]
+    return len(words) >= 2
 
 
 def parse_entry(text: str, page: int, column: int, main: bool, native: Optional[list[dict]] = None) -> Optional[Entry]:
@@ -343,9 +359,32 @@ def fold_fragments(entries: list[Entry]) -> list[Entry]:
     """
     out: list[Entry] = []
     for e in entries:
-        if out and not e.main and (e.text[:1].islower() or (not e.languages and len(e.term.split()) > 4)) and out[-1].section == e.section:
+        if re.match(r"^\d+ \d+ \d+ ", e.text):
+            continue  # a row of the index (word, page, column, line) that strayed into the glossary
+        if out and not e.main and (re.match(r"^\d+(?:st|nd|rd|th)?\b", e.term) or e.text[:1].islower() or (not e.languages and len(e.term.split()) > 4)) and out[-1].section == e.section:
             out[-1].text += " " + e.text
             out[-1].native += e.native
+        else:
+            out.append(e)
+    return out
+
+
+def _bare(e: Entry) -> bool:
+    outside = re.sub(r"\([^()]*(?:\([^()]*\)[^()]*)*\)", " ", e.text)
+    return bool(e.languages or "⟦native⟧" in e.text) and not [w for w in re.findall(r"\b[a-z]{2,}\b", outside) if w not in _FILLER]
+
+
+def merge_bare(entries: list[Entry]) -> list[Entry]:
+    """A headword with a language code and no meaning shares the meaning of the entry after it ("Nápita, H." / "Nai, Mar. ...")."""
+    out: list[Entry] = []
+    for i, e in enumerate(entries):
+        if i + 1 < len(entries) and e.section == entries[i + 1].section and e.page == entries[i + 1].page and _bare(e) and len(e.text) < 120:
+            nxt = entries[i + 1]
+            nxt.text = e.text.rstrip(" .") + ", " + nxt.text
+            nxt.native = e.native + nxt.native
+            nxt.main = nxt.main or e.main
+            nxt.languages = list(dict.fromkeys(e.languages + nxt.languages))
+            nxt.term = e.term
         else:
             out.append(e)
     return out
@@ -371,6 +410,15 @@ _HOMOGLYPHS = str.maketrans({
 # scripts that never occur in the book: whatever the reader put there is a misreading of a native word
 _FOREIGN = re.compile("[\u0400-\u04ff\u0370-\u03ff\u0590-\u05ff\u0a00-\u0a7f\u0d80-\u0dff\u0e00-\u0e7f\u1100-\u11ff\u3000-\u30ff\u3400-\u9fff\uac00-\ud7af]+")
 _REPEATS = re.compile(r"(\S)\1{5,}")
+_CAPS_PAREN = re.compile(r"\((?:\s*[A-Z]{2,}\s*)+\)|\(\s*[A-Z]{1,3}(?:\s*[A-Z]{1,3}){0,3}\s*[,)]")  # "(EXMICH)", "( TITTE )": a native word read as capital Latin
+_LOOP = re.compile(r"(\S+(?:\s+\S+){0,5}?)(?:\s+\1){2,}")  # a phrase said three times running: the reader looped on a native word
+_SINGLES = re.compile(r"(?<!\S)(?:\S\s+){4,}(?!\S)|(?<!\S)(?:\S\s+){3}\S(?!\S)")  # four or more one-character tokens in a row: "( E C C C"
+
+
+def _noise(g: str) -> bool:
+    """Parenthesised capitals and digits with no lowercase, no full stop and not a year: a native word read as Latin symbols."""
+    g = g.strip()
+    return g == g.upper() and "." not in g and len(g) >= 2 and not re.fullmatch(r"\d{1,4}|[?\d/ –-]{1,9}", g) and any(c.isupper() or c.isdigit() for c in g)
 
 
 def clean_reading(text: str) -> Optional[str]:
@@ -387,7 +435,7 @@ def clean_reading(text: str) -> Optional[str]:
         text = re.sub(r"\\[A-Za-z]+\{([^{}]*)\}", r"\1", text)
     text = unicodedata.normalize("NFC", text.replace("\\", ""))
     text = re.sub(r"(.{15,}?)\s+\1(?=\s|$)", r"\1", text, flags=re.I)  # the reader sometimes says a phrase twice
-    if _REPEATS.search(text):
+    if _CAPS_PAREN.search(text) or any(_noise(g) for g in re.findall(r"\(([^()]{2,30})\)", text)) or _REPEATS.search(text) or _LOOP.search(text) or _SINGLES.search(text):
         return None
     return None if _FOREIGN.search(text) else text.strip()
 
@@ -408,9 +456,11 @@ def repair_reading(reading: str, layer: str, lex: set[str]) -> str:
     seen = {fold(x) for x in re.findall(r"[^\W\d_]+", reading)}
     if SequenceMatcher(None, fold(layer), fold(reading)).ratio() < 0.55:
         return layer
-    if fold(cores[0]) in lex and len(cores[0]) >= 3 and fold(cores[0]) not in seen:
-        reading = toks[0] + " " + reading
-    if len(toks) > 1 and fold(cores[-1]) in lex and len(cores[-1]) >= 3 and fold(cores[-1]) not in seen:
+    rw = reading.split()
+    close = lambda a, bs: any(SequenceMatcher(None, fold(a), fold(b)).ratio() >= 0.7 for b in bs)
+    if len(rw) < len(toks) and len(cores[0]) >= 3 and cores[0].isalpha() and not close(cores[0], rw[:2]):
+        reading = toks[0] + " " + reading  # the reader cut the first word off the line
+    if len(rw) < len(toks) and len(toks) > 1 and len(cores[-1]) >= 3 and cores[-1].isalpha() and not close(cores[-1], rw[-2:]):
         reading = reading + " " + toks[-1]
     return reading
 
@@ -557,6 +607,12 @@ def native_span(text: str, code: str, check: bool = False) -> str:
     return html.escape(text)
 
 
+def _mixed_script(text: str) -> bool:
+    """One word holding letters of two scripts (Bengali with a Devanagari ra): the reader mixed up look-alike shapes."""
+    blocks = {(ord(c) - 0x0600) >> 7 for c in text if ord(c) >= 0x0600 and c.isalpha()}  # 128-code blocks: one per Indic script
+    return len(blocks) > 1 and not (blocks <= {0, 1, 2, 3})  # the Arabic blocks 0600-07FF and 0750 may legitimately mix
+
+
 def apply_native(entries: list[Entry], recognised: dict[str, str]) -> None:
     """Attach recognised words (id "page:x:y" of the word's first box -> text) to the entries' native groups."""
     for e in entries:
@@ -565,7 +621,7 @@ def apply_native(entries: list[Entry], recognised: dict[str, str]) -> None:
             if wid and recognised.get(wid):
                 n["text"] = recognised[wid]
                 n["score"] = match_score(e.text[:160], n["text"])
-                n["check"] = n["score"] < (30 if n["lang"] in ("A", "P", "H") else 40)
+                n["check"] = n["score"] < (30 if n["lang"] in ("A", "P", "H") else 40) or _mixed_script(n["text"])
 
 
 def _escape(text: str) -> str:
@@ -678,6 +734,9 @@ def _split_entry(e: Entry) -> tuple[str, str, str]:
     return head.strip(), ", ".join(e.languages), fill(rest).strip()
 
 
+_SCAN = "https://archive.org/details/glossaryofjudici00wilsuoft"
+
+
 def render_table(entries: list[Entry], title: str = "Wilson Glossary") -> str:
     """The whole glossary as one note: an A to Z section per letter, each a table of term, language and meaning.
 
@@ -696,7 +755,7 @@ def render_table(entries: list[Entry], title: str = "Wilson Glossary") -> str:
     for e, letter in zip(kept, letters_of):
         term, lang, meaning = _split_entry(e)
         meaning = link_see(meaning, {k: (v[0], "") for k, v in targets.items()}, title, pipe="\\|")  # a pipe inside a table cell must be escaped
-        by_letter.setdefault(letter, {}).setdefault(e.section, []).append(f"| {term} | {lang} | {meaning} |")
+        by_letter.setdefault(letter, {}).setdefault(e.section, []).append(f"| {term} | {lang} | {meaning} | [{e.page}]({_SCAN}/page/n{e.page - 1}) |")
     letters = sorted(by_letter)
     counts = {sec: sum(e.section == sec for e in kept) for sec in ("glossary", "supplement")}
     out = [
@@ -704,15 +763,15 @@ def render_table(entries: list[Entry], title: str = "Wilson Glossary") -> str:
         "H. H. Wilson, *A Glossary of Judicial and Revenue Terms, and of Useful Words Occurring in Official Documents Relating to the Administration of the Government of British India* (London, 1855). Public domain. Scan: Internet Archive, `glossaryofjudici00wilsuoft`.\n",
         f"> [!Info] How this was made\n> A program read the book line by line from page images and rebuilt {counts['glossary']:,} entries and {counts['supplement']:,} supplement entries, with the accents and the Arabic, Urdu, Devanagari, Bengali, Telugu, Kannada and other scripts in place. "
         "Nobody retyped or corrected it, so expect mistakes: wrong letters in native scripts (Telugu and Kannada most), and some entries cut or run together. "
-        "A native word with a dashed underline did not match the Latin spelling beside it. `[unread …]` marks a word that could not be read. Check the printed book for anything that matters. "
+        "A native word with a dashed underline did not match the Latin spelling beside it. `[unread …]` marks a word that could not be read. A spot check of random rows found roughly one in five with a defect. The Scan column links each row to its page in the Internet Archive scan: check it there for anything that matters. "
         "The book's own index of words and page numbers is not included.\n",
         "**Letters:** " + " · ".join(f"[[{title}#{l}|{l}]]" for l in letters) + "\n",
     ]
     for letter in letters:
         parts = by_letter[letter]
-        out += [f"## {letter}", "", "| Term | Language | Meaning |", "|---|---|---|"] + parts.get("glossary", [])
+        out += [f"## {letter}", "", "| Term | Language | Meaning | Scan |", "|---|---|---|---|"] + parts.get("glossary", [])
         if parts.get("supplement"):
-            out += ["", f"### Supplement, {letter}", "", "The supplement at the end of the book, a second A to Z.", "", "| Term | Language | Meaning |", "|---|---|---|"] + parts["supplement"]
+            out += ["", f"### Supplement, {letter}", "", "The supplement at the end of the book, a second A to Z.", "", "| Term | Language | Meaning | Scan |", "|---|---|---|---|"] + parts["supplement"]
         out.append("")
     return "\n".join(out)
 
@@ -731,7 +790,7 @@ def main(pdf: str, output_json: str, output_md: Optional[str], output_table: Opt
     if native:
         rows = (json.loads(l) for l in Path(native).read_text(encoding="utf-8").splitlines())
         apply_native(entries, {r["id"]: r["text"] for r in rows if r["status"] == "ok"})
-    entries = fold_fragments(entries)
+    entries = merge_bare(fold_fragments(entries))
     Path(output_json).write_text(json.dumps([asdict(e) for e in entries], ensure_ascii=False, indent=1), encoding="utf-8")
     if output_md:
         Path(output_md).write_text(render_markdown(entries), encoding="utf-8")
