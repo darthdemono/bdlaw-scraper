@@ -276,11 +276,14 @@ def group_text(group: list["Line"], page: int, lex: set[str]) -> tuple[str, list
 
 _LANG_ALT = "|".join(sorted(LANG_CODES, key=len, reverse=True))
 # a new headword and its language code after a finished sentence: two entries that ran into one line
+_CAP = "[A-ZÀ-ÖØ-Þ]"
+_SMALL = rf"{_CAP}[A-ZÀ-ÖØ-Þ'’\-]{{2,}}(?:,| or)[^.()]{{0,90}}?,? (?:{_LANG_ALT})\.\s|{_CAP}[A-ZÀ-ÖØ-Þ'’\-]{{2,}}, (?:corruptly|vernacularly|erroneously),? {_CAP}"  # a small-caps headword with variants and its code
 _RE_RUNON = re.compile(
     # a headword and its language code after a finished sentence: "... slave. GUMÁSHTA, vernacularly GUMASHTA, H. (...",
-    # "... a tax. Varigára, Karn. (...". Capitalised headwords need the code within a few words; small caps may carry variants.
-    rf"(?<=[.;:?)])\s+(?=(?:[A-ZÀ-ÖØ-Þ][\w'’\-]{{2,}}(?:(?:,| or) [A-ZÀ-ÖØ-Þ][\w'’\-]+)*,? (?:{_LANG_ALT})\.\s"
-    rf"|[A-ZÀ-ÖØ-Þ][A-ZÀ-ÖØ-Þ'’\-]{{2,}}(?:,| or)[^.()]{{0,90}}?,? (?:{_LANG_ALT})\.\s))"
+    # "... a tax. Varigára, Karn. (...". Capitalised headwords need the code within a few words; small caps may carry variants,
+    # and may follow a sentence whose full stop the scan lost ("... of the Mohammadans DAHR, DUHR, H. (...").
+    rf"(?:(?<=[.;:?)])\s+(?=(?:{_CAP}[\w'’\-]{{2,}}(?:(?:,| or) {_CAP}[\w'’\-]+)*,? (?:{_LANG_ALT})\.\s|{_SMALL}))"
+    rf"|(?<=[a-zà-ÿ])(?<!corruptly)(?<!vernacularly)(?<!erroneously)(?<!also)(?<!or)(?<!and)(?<!written)\s+(?={_SMALL}))"
 )
 
 
