@@ -106,7 +106,7 @@ def test_table_page_has_a_row_per_entry_and_see_links_to_the_letter():
     page = render_table([a, b])
     assert "| Term | Language | Meaning |" in page and "generated: true" in page
     assert '| **ABDAR** <span lang="ur" dir="rtl">آبدار</span> | Hindustani | A servant.' in page
-    assert "[[Wilson Glossary#A|Adasatta]]" in page and "[[Wilson Glossary#A|Zeta" not in page
+    assert "[[Wilson Glossary#A\\|Adasatta]]" in page and "Zeta" in page and "#A\\|Zeta" not in page
 
 
 def test_fold_fragments_joins_lowercase_pieces_to_the_entry_before():
@@ -161,3 +161,50 @@ def test_readings_replace_the_text_layer_and_undo_hyphenation():
     readings = {line_key(35, 0, 100.0): "ÁJNÁ, H. (साजा) Order, com-", line_key(35, 0, 110.0): "mand."}
     text, native = reading_text([a, b], 35, set(), readings)
     assert text == "ÁJNÁ, H. (साजा) Order, command." and native == []
+
+
+def test_repair_reading_restores_dropped_edge_words_and_replaces_nonsense():
+    from bdlaw_scraper.wilson import repair_reading
+
+    lex = {"medan", "law", "peons", "ment", "tax"}
+    assert repair_reading("law.", "medan law.", lex) == "medan law."
+    assert repair_reading("used al", "peons.", lex) == "peons."
+    assert repair_reading("Ábhári Dárogha, H. (آبكاري)", "Abkdri Ddrogha, H. (iCjjta^rj&T)", lex) == "Ábhári Dárogha, H. (آبكاري)"
+
+
+def test_clean_reading_fixes_lookalikes_marks_foreign_script_and_rejects_hallucinations():
+    from bdlaw_scraper.wilson import clean_reading
+
+    assert clean_reading("Тніке, Н. Rice") == "Thike, H. Rice"
+    assert clean_reading("Kakka, Karn. (〇〇) A father") is None  # a script the book never uses: fall back to the text layer
+    assert clean_reading("XXXXXXXXXXXXXXXX") is None
+
+
+def test_extended_runon_split_catches_small_caps_with_variants():
+    from bdlaw_scraper.wilson import split_runons
+
+    parts = [p for p, _ in split_runons("Gumi, H. A servant. GUMÁSHTA, vernacularly GUMASHTA, H. An agent. Varigára, Karn. A tax-gatherer.", [])]
+    assert [p.split(",")[0] for p in parts] == ["Gumi", "GUMÁSHTA", "Varigára"]
+
+
+def test_clean_reading_turns_latex_fractions_into_text_and_drops_repeated_phrases():
+    from bdlaw_scraper.wilson import clean_reading
+
+    assert clean_reading("12\\frac{3}{4} are equal to one rupee") == "12 3/4 are equal to one rupee"
+    assert clean_reading("a report drawn up by the collector A report drawn up by the collector") == "a report drawn up by the collector"
+
+
+def test_a_line_end_read_twice_is_collapsed():
+    from bdlaw_scraper.wilson import reading_text
+    from bdlaw_scraper.wilson_lines import line_key
+
+    a = Line(0, 100.0, 50.0, "adopting his son-in-law.")
+    readings = {line_key(35, 0, 100.0): "adopting his son-in-law. son-in-law."}
+    assert reading_text([a], 35, set(), readings)[0] == "adopting his son-in-law."
+
+
+def test_readings_never_hold_line_breaks_or_latex_and_running_heads_are_dropped():
+    from bdlaw_scraper.wilson import clean_reading
+
+    assert clean_reading("Dekh.\n\nSee Amanji.") == "Dekh. See Amanji."
+    assert clean_reading("Fine muslin. \\acute{A}bi and \\textbf{word}") == "Fine muslin. Ábi and word"

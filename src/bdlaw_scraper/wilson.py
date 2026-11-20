@@ -43,10 +43,11 @@ LANG_CODES = {
     "A": "Arabic", "P": "Persian", "H": "Hindustani", "S": "Sanskrit", "Hind": "Hindi", "Mar": "Marathi",
     "Beng": "Bengali", "Ben": "Bengali", "Tel": "Telugu", "Tam": "Tamil", "Karn": "Kannada", "Kara": "Kannada",
     "Guz": "Gujarati", "Uriya": "Uriya", "Mal": "Malayalam", "Sindhi": "Sindhi", "Pali": "Pali", "Tur": "Turkish",
-    "Eng": "English", "Thug": "Thug argot", "Tibet": "Tibetan", "Tarn": "Tamil", "Mai": "Malayalam", "II": "Hindustani",
+    "Eng": "English", "Hindi": "Hindi", "Thug": "Thug argot", "Tibet": "Tibetan", "Tarn": "Tamil", "Mai": "Malayalam", "II": "Hindustani",
     "Kar": "Kannada", "Mah": "Marathi", "Panj": "Panjabi", "Pers": "Persian", "Arab": "Arabic", "Sans": "Sanskrit", "Telu": "Telugu", "Port": "Portuguese", "Fr": "French", "Cing": "Cingalese", "Mahr": "Marathi",
 }
-_RE_LANG = re.compile(r"\b(" + "|".join(sorted(LANG_CODES, key=len, reverse=True)) + r")\.")
+# "H.", "Mar." but also "Hindi (" and "Uriya (": the longer names are printed in full, without a period
+_RE_LANG = re.compile(r"\b(" + "|".join(sorted(LANG_CODES, key=len, reverse=True)) + r")(?:\.|(?=,?\s*\())")
 # a parenthesis that holds native script: the OCR layer turns it into symbols and stray capitals
 _RE_NATIVE_JUNK = re.compile(r"[\^~£&*<>{}\[\]|\\«»_;]|[^\x00-ɏ]")
 
@@ -275,7 +276,12 @@ def group_text(group: list["Line"], page: int, lex: set[str]) -> tuple[str, list
 
 _LANG_ALT = "|".join(sorted(LANG_CODES, key=len, reverse=True))
 # a new headword and its language code after a finished sentence: two entries that ran into one line
-_RE_RUNON = re.compile(rf"(?<=[.;:?])\s+(?=[A-Z][\w'’\-]{{2,}}(?:(?:,| or) [A-Z][\w'’\-]+)*,? (?:{_LANG_ALT})\.\s)")
+_RE_RUNON = re.compile(
+    # a headword and its language code after a finished sentence: "... slave. GUMÁSHTA, vernacularly GUMASHTA, H. (...",
+    # "... a tax. Varigára, Karn. (...". Capitalised headwords need the code within a few words; small caps may carry variants.
+    rf"(?<=[.;:?)])\s+(?=(?:[A-ZÀ-ÖØ-Þ][\w'’\-]{{2,}}(?:(?:,| or) [A-ZÀ-ÖØ-Þ][\w'’\-]+)*,? (?:{_LANG_ALT})\.\s"
+    rf"|[A-ZÀ-ÖØ-Þ][A-ZÀ-ÖØ-Þ'’\-]{{2,}}(?:,| or)[^.()]{{0,90}}?,? (?:{_LANG_ALT})\.\s))"
+)
 
 
 def split_runons(text: str, native: list[dict]) -> list[tuple[str, list[dict]]]:
@@ -291,8 +297,8 @@ def split_runons(text: str, native: list[dict]) -> list[tuple[str, list[dict]]]:
 
 def parse_entry(text: str, page: int, column: int, main: bool, native: Optional[list[dict]] = None) -> Optional[Entry]:
     """Split an entry into term, languages and Latin text. `native` are the groups behind the ⟦native⟧ markers."""
-    clean, native = text, native or []
-    head = re.match(r"^(?P<term>[^()]{1,90}?)(?:,\s*|\s+)(?=(?:\(|[A-Z][a-z]*\.|&c\.|corruptly|also|or\b))", clean)
+    clean, native = text.lstrip(" .,;:"), native or []
+    head = re.match(r"^(?P<term>[^()]{1,90}?)(?:,\s*|\s+)(?=(?:\(|[A-Z][a-z]*\.|[A-Z][a-z]+,?\s*\(|&c\.|corruptly|also|or\b))", clean)
     term = (head.group("term") if head else clean.split(",")[0]).strip(" ,.;")
     if not term or len(term) > 90:
         return None
@@ -306,21 +312,16 @@ def parse_entry(text: str, page: int, column: int, main: bool, native: Optional[
     return Entry(page, column, term, langs, clean, native, main)
 
 
-_RE_INDEX_ROW = re.compile(r"\s\d{3}\s+\d{1,2}\s+\d{1,2}\b|\s\d{3}\s+\d\b")
 
 
-def assign_sections(entries: list[Entry], first_page: int = 35) -> list[Entry]:
+def assign_sections(entries: list[Entry], first_page: int = 35, index_page: int = 653) -> list[Entry]:
     """Mark front matter out, then glossary, supplement (the alphabet starts again after Z) and index.
 
     The glossary proper starts at first_page. The supplement begins at the first main
     headword in A after the Z section; the index begins where most entries are rows of page numbers.
     """
     out, seen_z, section = [], False, "glossary"
-    index_from = next(
-        (p for p in sorted({e.page for e in entries}) if p > first_page + 400
-         and sum(bool(_RE_INDEX_ROW.search(e.text)) for e in entries if e.page == p) >= max(3, sum(e.page == p for e in entries) * 0.4)),
-        10**6,
-    )
+    index_from = index_page  # the book's index of words and page numbers starts on page 653
     for e in entries:
         if e.page < first_page:
             continue
@@ -342,7 +343,7 @@ def fold_fragments(entries: list[Entry]) -> list[Entry]:
     """
     out: list[Entry] = []
     for e in entries:
-        if out and not e.main and e.text[:1].islower() and out[-1].section == e.section:
+        if out and not e.main and (e.text[:1].islower() or (not e.languages and len(e.term.split()) > 4)) and out[-1].section == e.section:
             out[-1].text += " " + e.text
             out[-1].native += e.native
         else:
@@ -360,6 +361,60 @@ def is_small_caps(first: str) -> bool:
     return len(letters) >= 3 and letters.isupper()
 
 
+# letters of other alphabets that the image reader mixes into Latin words
+_HOMOGLYPHS = str.maketrans({
+    "А": "A", "В": "B", "Е": "E", "К": "K", "М": "M", "Н": "H", "О": "O", "Р": "P", "С": "C", "Т": "T", "У": "Y", "Х": "X", "І": "I", "Ј": "J", "Ѕ": "S",
+    "а": "a", "е": "e", "о": "o", "р": "p", "с": "c", "у": "y", "х": "x", "і": "i", "ј": "j", "ѕ": "s", "ԁ": "d", "һ": "h", "ӏ": "l", "в": "b", "к": "k", "м": "m", "н": "h", "т": "t",
+    "Α": "A", "Β": "B", "Ε": "E", "Ζ": "Z", "Η": "H", "Ι": "I", "Κ": "K", "Μ": "M", "Ν": "N", "Ο": "O", "Ρ": "P", "Τ": "T", "Υ": "Y", "Χ": "X",
+    "ο": "o", "ν": "v", "ι": "i", "κ": "k", "ρ": "p", "α": "a",
+})
+# scripts that never occur in the book: whatever the reader put there is a misreading of a native word
+_FOREIGN = re.compile("[\u0400-\u04ff\u0370-\u03ff\u0590-\u05ff\u0a00-\u0a7f\u0d80-\u0dff\u0e00-\u0e7f\u1100-\u11ff\u3000-\u30ff\u3400-\u9fff\uac00-\ud7af]+")
+_REPEATS = re.compile(r"(\S)\1{5,}")
+
+
+def clean_reading(text: str) -> Optional[str]:
+    """Tidy one image reading: no tags, Latin look-alikes put right, foreign-script guesses marked unread.
+
+    Returns None when the reading is a hallucination (a character repeated six times or more) or holds a script the book
+    does not use (the reader guessed at a Telugu or Kannada word): the text layer is used instead for that line.
+    """
+    text = _RE_TAGS.sub("", text).translate(_HOMOGLYPHS)
+    text = re.sub(r"\s+", " ", text)  # a reading may hold line breaks: they would end a table row
+    text = re.sub(r"\\frac\{(\d+)\}\{(\d+)\}", r" \1/\2", text)  # fractions and accents come back as LaTeX
+    text = re.sub(r"\\(acute|grave|hat|tilde|bar|breve|dot)\{(\w)\}", lambda m: m.group(2) + {"acute": "\u0301", "grave": "\u0300", "hat": "\u0302", "tilde": "\u0303", "bar": "\u0304", "breve": "\u0306", "dot": "\u0307"}[m.group(1)], text)
+    for _ in range(3):
+        text = re.sub(r"\\[A-Za-z]+\{([^{}]*)\}", r"\1", text)
+    text = unicodedata.normalize("NFC", text.replace("\\", ""))
+    text = re.sub(r"(.{15,}?)\s+\1(?=\s|$)", r"\1", text, flags=re.I)  # the reader sometimes says a phrase twice
+    if _REPEATS.search(text):
+        return None
+    return None if _FOREIGN.search(text) else text.strip()
+
+
+def repair_reading(reading: str, layer: str, lex: set[str]) -> str:
+    """Fix what image reading gets wrong on a line whose text layer is plain English.
+
+    Short lines lose their first or last word ("medan law." read as "law."), and a few come back as nonsense.
+    A first or last word of the layer that is real English and missing from the reading is put back;
+    a plain-English layer line the reading barely resembles replaces the reading.
+    """
+    from difflib import SequenceMatcher
+
+    toks = layer.split()
+    cores = [_RE_TOKEN.match(t).group(2) if _RE_TOKEN.match(t) else t for t in toks]
+    if not toks or any(is_junk(c, lex) for c in cores):
+        return reading  # the layer is itself damaged here (native script): trust the reading
+    seen = {fold(x) for x in re.findall(r"[^\W\d_]+", reading)}
+    if SequenceMatcher(None, fold(layer), fold(reading)).ratio() < 0.55:
+        return layer
+    if fold(cores[0]) in lex and len(cores[0]) >= 3 and fold(cores[0]) not in seen:
+        reading = toks[0] + " " + reading
+    if len(toks) > 1 and fold(cores[-1]) in lex and len(cores[-1]) >= 3 and fold(cores[-1]) not in seen:
+        reading = reading + " " + toks[-1]
+    return reading
+
+
 def reading_text(group: list["Line"], page: int, lex: set[str], readings: dict[str, str]) -> tuple[str, list[dict]]:
     """The entry's text from the image readings of its lines; a line with no reading falls back to the text layer."""
     from bdlaw_scraper.wilson_lines import line_key
@@ -367,16 +422,19 @@ def reading_text(group: list["Line"], page: int, lex: set[str], readings: dict[s
     out, native = "", []
     for l in group:
         got = readings.get(line_key(page, l.column, l.y))
+        piece = None
         if got:
-            piece = _RE_TAGS.sub("", got).strip()
-        else:
+            cleaned = clean_reading(got)
+            piece = repair_reading(cleaned, l.text, lex) if cleaned else None
+        if piece is None:  # no reading, or an unusable one: the text layer, with its junk words marked
             piece, nat = group_text([l], page, lex)
             native += nat
         if out.endswith("-") and piece[:1].islower() and len(out) > 1 and out[-2].isalpha():
             out = out[:-1] + piece  # undo end-of-line hyphenation
         else:
             out = (out + " " + piece).strip()
-    return out, native
+    # a line end read twice ("his son-in-law. son-in-law."): drop the immediate repeat of a chunk of five letters or more
+    return re.sub(r"(\S{5,}(?:\s\S+){0,2}?)\s+\1(?=\s|$)", r"\1", out, flags=re.I), native
 
 
 def build_entries(pdf: Path, readings: Optional[dict[str, str]] = None) -> list[Entry]:
@@ -395,8 +453,11 @@ def build_entries(pdf: Path, readings: Optional[dict[str, str]] = None) -> list[
         for group in split_entries(merged, h):
             text, native = reading_text(group, pno, lex, readings or {})
             continues = group[0].text.startswith("→")
+            if re.fullmatch(r"(GLOSSARY\.?\s*)?[A-Z]{1,4}\.?(\s+[A-Z]{1,4}\.?)?", text.strip()):
+                continue  # a running head ("GLOSSARY. AB") that sits inside the body area
             for n, (part, nat) in enumerate(split_runons(text, native)):
-                e = parse_entry(part, pno, group[0].column, main=is_small_caps(part), native=nat)
+                # small caps come back from the image reading in mixed case, so the first line's text layer decides for the first part
+                e = parse_entry(part, pno, group[0].column, main=is_small_caps(group[0].text if n == 0 else part), native=nat)
                 if e is None:
                     continue
                 if continues and n == 0 and entries:  # continues the previous entry
@@ -469,7 +530,7 @@ _SCRIPT_RUN = re.compile(
 )
 
 
-def wrap_scripts(text: str) -> str:
+def wrap_scripts(text: str, headword: str = "") -> str:
     """Wrap every run of native script in the text (already HTML-escaped) in a language-tagged span.
 
     The language comes from the script and, where the script is shared, from the language code printed before it.
@@ -478,7 +539,7 @@ def wrap_scripts(text: str) -> str:
     def one(m: re.Match) -> str:
         codes = _RE_LANG.findall(text[max(0, m.start() - 70): m.start()])
         code = codes[-1] if codes else ""
-        score = match_score(re.sub(r"<[^>]*>", "", text[max(0, m.start() - 160): m.start() + 160]), m.group(0))
+        score = match_score(re.sub(r"<[^>]*>", "", headword + " " + text[max(0, m.start() - 160): m.start() + 160]), m.group(0))
         return native_span(m.group(0), code, score < (30 if code in ("A", "P", "H", "Hind") else 40))
 
     return _SCRIPT_RUN.sub(one, text)
@@ -572,19 +633,19 @@ def _names(e: Entry) -> list[str]:
 _RE_SEE = re.compile(r"\b([Ss]ee) ((?:[A-Z][\w'’\-]*)(?:(?:,| and| or|, and) [A-Z][\w'’\-]*)*)")
 
 
-def link_see(text: str, targets: dict[str, tuple[str, str]], folder: str) -> str:
+def link_see(text: str, targets: dict[str, tuple[str, str]], folder: str, pipe: str = "|") -> str:
     """"See Adasatta and Arsatha" -> wikilinks to the headwords that exist exactly once."""
     def one(m: re.Match) -> str:
         name = m.group(0)
         key = "".join(c for c in unicodedata.normalize("NFD", name.lower()) if not unicodedata.combining(c))
         key = re.sub(r"[^a-z\- ]", "", key).strip()
         hit = targets.get(key)
-        return (f"[[{folder}{hit[0]}|{name}]]" if hit[0].startswith("#") else f"[[{folder}/{hit[0]}#^{hit[1]}|{name}]]") if hit else name
+        return (f"[[{folder}{hit[0]}{pipe}{name}]]" if hit[0].startswith("#") else f"[[{folder}/{hit[0]}#^{hit[1]}{pipe}{name}]]") if hit else name
 
     return _RE_SEE.sub(lambda m: m.group(1) + " " + re.sub(r"[A-Z][\w'’\-]*", one, m.group(2)), text)
 
 
-_RE_CODES = re.compile(rf"^(?:(?:(?:{_LANG_ALT})\.|\(\?\))(?:\s*&amp;c\.)?[,\s]*)+")
+_RE_CODES = re.compile(rf"^(?:(?:(?:{_LANG_ALT})(?:\.|(?=,?\s*\())|\(\?\))(?:\s*&amp;c\.)?[,\s]*)+")
 
 
 def _split_entry(e: Entry) -> tuple[str, str, str]:
@@ -596,15 +657,15 @@ def _split_entry(e: Entry) -> tuple[str, str, str]:
 
     def fill(text: str) -> str:
         """Native script printed in the text becomes spans; markers left by the text layer are filled from the recognised words."""
-        text = wrap_scripts(text)
+        text = wrap_scripts(text, e.text[:90])
         for n in marks:
             if "⟦native⟧" not in text:
                 break
             text = text.replace("⟦native⟧", shown(n), 1)
         return text.replace("⟦native⟧", "[unread]")
 
-    text = _escape(e.text)
-    term = _escape(e.term)
+    text = _escape(re.sub(r"\s+", " ", e.text))
+    term = _escape(re.sub(r"\s+", " ", e.term))
     if not e.languages and len(e.term.split()) > 4:  # a sentence, not a headword: the entry's tail cut loose
         return "", "", fill(text)
     rest = text[len(term):] if text.startswith(term) else text
@@ -634,15 +695,15 @@ def render_table(entries: list[Entry], title: str = "Wilson Glossary") -> str:
     by_letter: dict[str, dict[str, list[str]]] = {}
     for e, letter in zip(kept, letters_of):
         term, lang, meaning = _split_entry(e)
-        meaning = link_see(meaning, {k: (v[0], "") for k, v in targets.items()}, title)
+        meaning = link_see(meaning, {k: (v[0], "") for k, v in targets.items()}, title, pipe="\\|")  # a pipe inside a table cell must be escaped
         by_letter.setdefault(letter, {}).setdefault(e.section, []).append(f"| {term} | {lang} | {meaning} |")
     letters = sorted(by_letter)
     counts = {sec: sum(e.section == sec for e in kept) for sec in ("glossary", "supplement")}
     out = [
         f"---\ntitle: {title}\ndescription: H. H. Wilson's Glossary of Judicial and Revenue Terms of British India (1855), rebuilt from a scan with its South Asian words.\ngenerated: true\ntags:\n  - Wilson\n---\n",
         "H. H. Wilson, *A Glossary of Judicial and Revenue Terms, and of Useful Words Occurring in Official Documents Relating to the Administration of the Government of British India* (London, 1855). Public domain. Scan: Internet Archive, `glossaryofjudici00wilsuoft`.\n",
-        f"> [!Info] How this was made\n> A program rebuilt {counts['glossary']:,} entries and {counts['supplement']:,} supplement entries from the scan's text layer, and read the Arabic, Urdu, Devanagari, Bengali, Telugu, Kannada and other scripts from page images. "
-        "Nobody retyped or corrected it, so expect mistakes: lost accents, wrong letters in native scripts (Telugu and Kannada most), and some entries cut or run together. "
+        f"> [!Info] How this was made\n> A program read the book line by line from page images and rebuilt {counts['glossary']:,} entries and {counts['supplement']:,} supplement entries, with the accents and the Arabic, Urdu, Devanagari, Bengali, Telugu, Kannada and other scripts in place. "
+        "Nobody retyped or corrected it, so expect mistakes: wrong letters in native scripts (Telugu and Kannada most), and some entries cut or run together. "
         "A native word with a dashed underline did not match the Latin spelling beside it. `[unread …]` marks a word that could not be read. Check the printed book for anything that matters. "
         "The book's own index of words and page numbers is not included.\n",
         "**Letters:** " + " · ".join(f"[[{title}#{l}|{l}]]" for l in letters) + "\n",
