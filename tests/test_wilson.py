@@ -76,7 +76,8 @@ def test_sections_glossary_supplement_and_front_matter_dropped():
 def test_markdown_groups_by_letter_and_marks_native_words():
     e = parse_entry("ABAD, H. (A. ^^) Cultivated.", 40, 0, True)
     md = render_markdown([e])
-    assert md.startswith("## A") and "**ABAD**, H. (A. [native Arabic])" not in md or "[native" in md
+    assert md.startswith("## A")
+    assert "**ABAD**, H. (A. [native Arabic])" not in md or "[native" in md
     assert "**ABAD**" in md
 
 
