@@ -1781,6 +1781,32 @@ _RE_INLINE_ITEM_SEP = re.compile(
 )
 
 
+# A quoted new section runs its title and first sub-clause together: "77A. Title.-(1) text".
+# "(2)" on the next line is already a list item, so "(1)" has to be one too.
+_RE_HEADING_THEN_ONE = re.compile(
+    r"^([“\"]?\d+[A-Za-z]{0,2}\.\s[^()|\n]{3,150}?\.)\s*-?\s*\((1|১)\)\s+(\S.*)$"
+)
+_RE_NEXT_IS_TWO = re.compile(r"^\s*(?:\d+\.\s*<!--n:)?\((?:2|২)\)")
+
+
+def _split_heading_before_first_subclause(text: str) -> str:
+    """Move '(1) text' onto its own line when it follows a section title on the same line.
+
+    Only when the next non-blank line starts with '(2)', so ordinary sentences stay as they are.
+    """
+    lines = text.split("\n")
+    for i, line in enumerate(lines):
+        m = _RE_HEADING_THEN_ONE.match(line)
+        if not m:
+            continue
+        j = i + 1
+        while j < len(lines) and not lines[j].strip():
+            j += 1
+        if j < len(lines) and _RE_NEXT_IS_TWO.match(lines[j]):
+            lines[i] = f"{m.group(1)}\n\n({m.group(2)}) {m.group(3)}"
+    return "\n".join(lines)
+
+
 def _split_inline_list_items(text: str) -> str:
     """Split inline sub-clauses like '...; (d) text' onto separate lines.
 
@@ -2739,6 +2765,7 @@ def html_to_markdown(
     raw = _strip_unmatched_open_brackets(raw)
     raw = re.sub(r"^\.\s+(?=\()", "", raw.lstrip())
     raw = _join_isolated_labels(raw)
+    raw = _split_heading_before_first_subclause(raw)
     raw = _split_inline_list_items(raw)
     raw = _join_fragment_lines(raw)
     raw = _join_sentence_continuations(raw)

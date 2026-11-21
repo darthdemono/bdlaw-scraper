@@ -773,6 +773,16 @@ def test_bengali_explanation_inside_a_quoted_amendment_is_not_a_callout():
     assert _convert_single_callout(doc, _RE_EXPL_SINGLE, _RE_EXPL_NUMBERED, "Explanation") == doc
 
 
+def test_first_subclause_after_a_quoted_section_title_gets_its_own_line():
+    from bdlaw_scraper.scraper import _split_heading_before_first_subclause as split
+
+    t = "77A. Applicability of this Act to digitized registration system.-(1) Notwithstanding anything.\n\n(2) For carrying out."
+    assert split(t).split("\n")[:3] == ["77A. Applicability of this Act to digitized registration system.", "", "(1) Notwithstanding anything."]
+    assert split("“80. Fees etc. payable on presentation. (1) All fees.\n\n(2) The Government.").startswith("“80. Fees etc. payable on presentation.\n\n(1) All fees.")
+    lone = "4. Short title. (1) This Act applies to all."
+    assert split(lone) == lone
+
+
 @pytest.mark.parametrize(
     "h3, title, num",
     [
