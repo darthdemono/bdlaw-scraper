@@ -771,3 +771,23 @@ def test_bengali_explanation_inside_a_quoted_amendment_is_not_a_callout():
 
     doc = "প্রতিস্থাপিত হইবে, যথা:- “রেস্তোরাঁ:\nব্যাখ্যা: “রেস্তোরাঁ” অর্থ কোন স্থান”"
     assert _convert_single_callout(doc, _RE_EXPL_SINGLE, _RE_EXPL_NUMBERED, "Explanation") == doc
+
+
+@pytest.mark.parametrize(
+    "h3, title, num",
+    [
+        ('<span class="footnote" title="x"><sup>1</sup></span>[বাংলাদেশ পেটেন্ট আইন, ২০২২', "বাংলাদেশ পেটেন্ট আইন, ২০২২", 1),
+        ("1[শরীয়তপুর কৃষি বিশ্ববিদ্যালয়] আইন, ২০২৩", "শরীয়তপুর কৃষি বিশ্ববিদ্যালয় আইন, ২০২৩", 1),
+        ("THE <sup>1</sup>[***] SATI REGULATION, 1829", "THE SATI REGULATION, 1829", 1),
+        ("ইউনিভার্সিটি অব ফ্রন্টিয়ার টেকনোলজি, বাংলাদেশ] আইন, ২০১৬", "ইউনিভার্সিটি অব ফ্রন্টিয়ার টেকনোলজি, বাংলাদেশ আইন, ২০১৬", None),
+        ("THE 1[ * * * ] WILLS REGULATION, 1799", "THE WILLS REGULATION, 1799", 1),
+        ("7The Penal Code", "The Penal Code", 7),
+        ("1*বাংলাদেশ শিল্পকলা একাডেমি আইন, ১৯৮৯", "বাংলাদেশ শিল্পকলা একাডেমি আইন, ১৯৮৯", 1),
+    ],
+)
+def test_act_title_drops_footnote_digit_and_stray_brackets(h3, title, num):
+    from bdlaw_scraper.scraper import parse_act_title, _extract_title_footnote_num
+
+    soup = BeautifulSoup(f'<section class="bg-act-section"><h3>{h3}</h3></section>', "html.parser")
+    assert parse_act_title(soup) == title
+    assert _extract_title_footnote_num(soup) == num

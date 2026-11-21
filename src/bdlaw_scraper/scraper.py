@@ -1034,6 +1034,27 @@ def parse_toc(soup: BeautifulSoup, base: str) -> dict[str, str]:
     return section_map
 
 
+# "1[Title", "THE 1[***] X", "1[A B] C": the site puts the footnote digit in front of
+# a bracket that is often unbalanced (closing bracket missing or stray)
+_RE_TITLE_OMITTED = re.compile(r"\s*\d{1,4}\s*\[\s*(?:\*\s*){3}\]")
+_RE_TITLE_LEAD_NUM = re.compile(r"^\s*(\d{1,4})\s*[\[*]")
+_RE_TITLE_MID_NUM = re.compile(r"\d{1,4}\s*\[(?!\s*(?:\*\s*){3}\])")
+
+
+def _clean_title(raw: str) -> str:
+    """Strip footnote digits and every stray bracket from an act title.
+
+    @param raw  Text of the title h3.
+    @return     Title without footnote markers or brackets.
+    """
+    raw = _RE_HEADING_FOOTNOTE.sub(r"\2", raw)
+    raw = _RE_TITLE_OMITTED.sub("", raw)
+    raw = _RE_TITLE_LEAD_NUM.sub("", raw)
+    raw = _RE_TITLE_MID_NUM.sub("", raw)
+    raw = re.sub(r"^(\d+)([A-Z])", r"\2", raw.strip())
+    return re.sub(r"\s{2,}", " ", re.sub(r"[\[\]]", "", raw)).strip()
+
+
 def parse_act_title(soup: BeautifulSoup) -> str:
     """Extract the act title from the section.bg-act-section h3 element.
 
@@ -1048,10 +1069,7 @@ def parse_act_title(soup: BeautifulSoup) -> str:
         h3 = section.find("h3")
         if h3:
             raw = _normalise(" ".join(h3.get_text().split()))
-            raw = _RE_HEADING_FOOTNOTE.sub(r"\2", raw)
-            raw = raw.strip("[]").strip()
-            raw = re.sub(r"^(\d+)([A-Z])", r"\2", raw)
-            return raw
+            return _clean_title(raw)
     return ""
 
 
@@ -1076,6 +1094,9 @@ def _extract_title_footnote_num(soup: BeautifulSoup) -> Optional[int]:
             m2 = re.match(r"^(\d+)[A-Z]", raw.strip())
             if m2:
                 return int(m2.group(1))
+            m3 = _RE_TITLE_LEAD_NUM.match(raw) or _RE_TITLE_MID_NUM.search(raw) or _RE_TITLE_OMITTED.search(raw)
+            if m3:
+                return int(re.search(r"\d+", m3.group(0)).group(0))
     return None
 
 
