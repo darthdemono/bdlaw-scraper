@@ -21,3 +21,17 @@ def test_status_file_is_written_whole(tmp_path):
     st.update("running", records=3)
     body = json.loads((tmp_path / "status.json").read_text())
     assert body["state"] == "running" and body["records"] == 3 and not (tmp_path / "status.tmp").exists()
+
+
+def test_subordinate_court_list_cards_are_read():
+    from bdlaw_scraper.harvest.decision import names, parse_list
+
+    page = '<!-- Ticket item START --><div><a href="https://decision.bdcourts.gov.bd/home/judgement/abc123="><h5> GR 176/2017 State vs X </h5></a><h6>13 Sep, 2026</h6><p>drugs case</p></div>'
+    assert parse_list(page) == [{"token": "abc123=", "title": "GR 176/2017 State vs X", "date": "13 Sep, 2026", "kind": "drugs case"}]
+
+    class Fake:
+        def fetch(self, url, data=None, cache=True):
+            assert cache is False  # the court lists are never written to disk
+            return b'[{"id":"1","name_en":"Barguna","name_bn":"x","login_id":"u","password":"secret"}]'
+
+    assert names(Fake(), "u") == [{"id": "1", "name_en": "Barguna", "name_bn": "x"}]

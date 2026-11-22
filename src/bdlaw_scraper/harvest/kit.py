@@ -84,21 +84,25 @@ class Polite:
             h["Content-Type"] = "application/x-www-form-urlencoded"
         return urllib.request.urlopen(urllib.request.Request(url, data=body, headers=h), timeout=60)
 
-    def fetch(self, url: str, data: dict | None = None) -> bytes:
-        """A page, from the disk cache if it was ever fetched. Empty bytes for a 404."""
+    def fetch(self, url: str, data: dict | None = None, cache: bool = True) -> bytes:
+        """A page, from the disk cache if it was ever fetched. Empty bytes for a 404.
+
+        cache=False for an answer that must not be written to disk (a response that carries something it should not).
+        """
         key = hashlib.sha1((url + (json.dumps(data, sort_keys=True) if data else "")).encode()).hexdigest()
         path = self.root / "cache" / key[:2] / key
-        if path.exists():
+        if cache and path.exists():
             return path.read_bytes()
         for attempt in range(5):
             self._wait()
             try:
                 body = self._open(url, data).read()
                 self.fails = 0
-                path.parent.mkdir(parents=True, exist_ok=True)
-                tmp = path.with_suffix(".part")
-                tmp.write_bytes(body)
-                os.replace(tmp, path)
+                if cache:
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    tmp = path.with_suffix(".part")
+                    tmp.write_bytes(body)
+                    os.replace(tmp, path)
                 self.log.write(json.dumps({"t": now(), "url": url, "post": bool(data), "bytes": len(body)}) + "\n")
                 return body
             except urllib.error.HTTPError as e:
