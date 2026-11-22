@@ -13,7 +13,7 @@ from bdlaw_scraper.harvest.kit import Polite, Status, Stop, db
 SOURCES = {
     "ain": {"host": "ain.bd", "sitemaps": ["https://ain.bd/sitemap_index.xml"], "follow": False, "delay": 1.5},
     "bdpil": {"host": "bdpil.org", "sitemaps": ["https://bdpil.org/wp-sitemap.xml"], "follow": False, "delay": 1.5},
-    "blast": {"host": "blast.org.bd", "sitemaps": ["https://blast.org.bd/sitemap_index.xml"], "follow": False, "delay": 1.5},
+    "blast": {"host": "blast.org.bd", "sitemaps": ["https://blast.org.bd/sitemap_index.xml"], "follow": False, "delay": 4.0},
     "nbr": {"host": "nbr.gov.bd", "seeds": ["https://nbr.gov.bd/", "https://nbr.gov.bd/regulations/acts/vat-acts/eng"], "follow": True, "delay": 1.5,
             "follow_re": r"nbr\.gov\.bd/(regulations|laws|acts|sro|rules|circular|order)"},
     "bb": {"host": "www.bb.org.bd", "seeds": ["https://www.bb.org.bd/en/index.php/mediaroom/circular"], "follow": False, "delay": 2.0},
