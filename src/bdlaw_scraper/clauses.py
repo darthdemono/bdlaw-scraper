@@ -34,19 +34,71 @@ def _mark_id(mark: str) -> str:
     return _secnum_to_block_id(mark)
 
 
+_RE_INSERTED = re.compile(r"^(\d+)[a-z]{1,2}$")
+_RE_PLAIN_NUM = re.compile(r"^(\d+)$")
+
+
+def _inserted_of(mark: str, lines: list[str], i: int, depth: int) -> bool:
+    """True when this item is an inserted clause ("1a") nested directly in its parent clause ("1")."""
+    m = _RE_INSERTED.match(mark)
+    if not m:
+        return False
+    for j in range(i - 1, -1, -1):
+        p = _RE_LIST_LINE.match(lines[j])
+        if p and len(p.group(1)) // 3 == depth - 1:
+            pm = _RE_INSERTED.match(p.group(2)) or _RE_PLAIN_NUM.match(p.group(2))
+            return bool(pm) and pm.group(1) == m.group(1)
+        if lines[j].startswith("#"):
+            break
+    return False
+
+
+def nest_inserted_clauses(md: str) -> str:
+    """Indent inserted clauses ("(1a)", "(1b)") under the clause they were inserted after ("(1)")."""
+    lines = md.split("\n")
+    out: list[str] = []
+    base = ""        # digits of the last plain top-level clause
+    inserted = False  # inside an indented inserted clause: its own children move in too
+    k = 0
+    for line in lines:
+        m = _RE_LIST_LINE.match(line)
+        if m and not m.group(1):
+            mark = m.group(2)
+            pm = _RE_PLAIN_NUM.match(mark)
+            im = _RE_INSERTED.match(mark)
+            if pm:
+                base, inserted, k = pm.group(1), False, 0
+            elif im and im.group(1) == base:
+                inserted, k = True, k + 1
+                out.append("   " + re.sub(r"^\d+\.", f"{k}.", line, count=1))
+                continue
+            else:
+                base, inserted = "", False
+        elif line.startswith("#"):
+            base, inserted = "", False
+        elif inserted and line.startswith("   ") and line.strip():
+            out.append("   " + line)
+            continue
+        elif line.strip() and not line.startswith(" "):
+            inserted = False
+        out.append(line)
+    return "\n".join(out)
+
+
 def anchor_items(md: str) -> tuple[str, set[str]]:
     """Put a block id at the end of every single-line list item. Returns the Markdown and the ids written."""
     lines = md.split("\n")
     known: set[str] = set()
     base = ""
     stack: dict[int, str] = {}
+    hidden: set[int] = set()
     for i, line in enumerate(lines):
         head = _RE_SEC_HEAD.match(line)
         if head:
-            base, stack = head.group(1), {}
+            base, stack, hidden = head.group(1), {}, set()
             continue
         if line.startswith("#"):
-            base, stack = "", {}
+            base, stack, hidden = "", {}, set()
             continue
         m = _RE_LIST_LINE.match(line)
         if not m or not base:
@@ -54,14 +106,17 @@ def anchor_items(md: str) -> tuple[str, set[str]]:
         depth = len(m.group(1)) // 3
         for d in [d for d in stack if d >= depth]:
             del stack[d]
+        hidden = {d for d in hidden if d < depth}
         mark = _mark_id(m.group(2))
         stack[depth] = mark
+        if depth and _inserted_of(m.group(2), lines, i, depth):
+            hidden.add(depth - 1)  # (1a) sits inside (1) but keeps the id "1a"
         if not mark or any(d not in stack for d in range(depth)) or _RE_HAS_ID.search(line):
             continue
         nxt = lines[i + 1] if i + 1 < len(lines) else ""
         if nxt.strip() and not _RE_LIST_LINE.match(nxt) and not nxt.startswith("#"):
             continue  # a multi-line item: the id would have to sit on its last line
-        ident = base + "".join("-" + stack[d] for d in range(depth + 1))
+        ident = base + "".join("-" + stack[d] for d in range(depth + 1) if d not in hidden)
         if ident in known:
             continue
         known.add(ident)
@@ -139,6 +194,41 @@ def anchor_and_link(md: str, act_number: str) -> str:
     fm = re.match(r"---\n.*?\n---\n", md, re.DOTALL)
     if fm:
         head, md = md[: fm.end()], md[fm.end() :]
-    md, known = anchor_items(md)
+    md, known = anchor_items(nest_inserted_clauses(md))
     sections = set(re.findall(r"\^(sec-[a-z0-9]+)\s*$", md, flags=re.M))
-    return head + link_clauses(md, act_number, known | sections)
+    md = link_clauses(md, act_number, known | sections)
+    return head + link_footnote_clauses(md, act_number)
+
+_FN_REF = re.compile(r"\[\^(\d+)\](?!:)")
+_FN_DEF = re.compile(r"^\[\^(\d+)\]: (.*)$")
+_FN_CLAUSES = re.compile(r"(?i)\b(?:clauses?|sub-?sections?|paragraphs?)\s+((?:\([0-9A-Za-z]+\)(?:\s*,\s*|\s+(?:and|or)\s+)?)+)")
+_SEC_ID = re.compile(r"\^(sec-[a-z0-9]+)\s*$")
+
+
+def link_footnote_clauses(md: str, act_number: str) -> str:
+    """"Clause (21) was substituted ..." in a footnote links to that clause of the section carrying the note."""
+    lines = md.split("\n")
+    anchors = set(re.findall(r"\^(sec-[a-z0-9-]+)\s*$", md, flags=re.M))
+    where: dict[str, str] = {}
+    cur = ""
+    for ln in lines:
+        if ln.startswith("#"):
+            m = _SEC_ID.search(ln)
+            cur = m.group(1) if m else cur
+        elif not _FN_DEF.match(ln):
+            for n in _FN_REF.findall(ln):
+                where.setdefault(n, cur)
+    for i, ln in enumerate(lines):
+        d = _FN_DEF.match(ln)
+        if not d or not where.get(d.group(1)):
+            continue
+        sec = where[d.group(1)]
+
+        def fix(m: re.Match) -> str:
+            def one(x: re.Match) -> str:
+                a = f"{sec}-{x.group(1).lower()}"
+                return f"[[act-{act_number}#^{a}\\|({x.group(1)})]]" if a in anchors else x.group(0)
+            return re.sub(r"\(([0-9A-Za-z]+)\)", one, m.group(0))
+
+        lines[i] = f"[^{d.group(1)}]: " + _FN_CLAUSES.sub(fix, d.group(2))
+    return "\n".join(lines)
