@@ -400,9 +400,12 @@ _RE_REPEALED_INLINE = re.compile(r"\b(Repealed by [^.;\n]*[.;])")
 _SEC_NUM = r"\d+[A-Za-zক-হ]?(?:-[A-Za-z0-9]+)?"
 # "section 64" or a list such as "sections 64, 65, 66 and 445" / "sections 3 or 4" / "sections 5 to 9".
 # A number after the first must not be a quantity ("sections 3 and 4 years").
+# Horizontal whitespace: a reference list never runs across a line break, so a list-item number at the start
+# of the next line ("section 2, or\n2. imports ...") is not read as one more section of the list.
+_HS = r"[^\S\n]"
 _RE_SECTION_REF = re.compile(
     rf"(?<!sub-)\b(sections?)\s+({_SEC_NUM}\b"
-    rf"(?:(?:\s*,\s*(?:(?:and|or)\s+)?|\s+(?:and|or|to)\s+){_SEC_NUM}\b"
+    rf"(?:(?:{_HS}*,{_HS}*(?:(?:and|or){_HS}+)?|{_HS}+(?:and|or|to){_HS}+){_SEC_NUM}\b"
     r"(?!\s+(?:years?|months?|days?|weeks?|times?|per\s*cent|percent|taka|rupees|hundred)))*)"
     r"(?P<tail>(?:\([A-Za-z0-9]{1,4}\))*)",
     re.IGNORECASE,
@@ -418,12 +421,12 @@ _BN_TAIL = (
 _RE_SECTION_REF_BN = re.compile(
     r"(?<!উপ-)(?<!উপ)(ধারাসমূহ|ধারা|অনুচ্ছেদসমূহ|অনুচ্ছেদ|বিধিসমূহ|বিধি|প্রবিধানসমূহ|প্রবিধান)"
     rf"\s+({_SEC_NUM}"
-    rf"(?:(?:\s*,\s*|\s+(?:ও|এবং|বা|হইতে)\s+){_SEC_NUM}"
+    rf"(?:(?:{_HS}*,{_HS}*|{_HS}+(?:ও|এবং|বা|হইতে){_HS}+){_SEC_NUM}"
     r"(?!\s*(?:বৎসর|বছর|মাস|দিন|টাকা|শতাংশ|জন|টি))\b)*)" + _BN_TAIL
 )
 # Number first: "৫ ধারা", "৬ ও ৭ ধারার", "১২ নং ধারা". "ধারাবাহিক" (continuous) is not a section.
 _RE_SECTION_REF_BN_POST = re.compile(
-    rf"(?<![\d\w])(?P<nums>{_SEC_NUM}(?:(?:\s*,\s*|\s+(?:ও|এবং|বা)\s+){_SEC_NUM})*)\s*(?:নং\s+)?"
+    rf"(?<![\d\w])(?P<nums>{_SEC_NUM}(?:(?:{_HS}*,{_HS}*|{_HS}+(?:ও|এবং|বা){_HS}+){_SEC_NUM})*)\s*(?:নং\s+)?"
     r"(?P<word>ধারা(?:সমূহ)?)(?:র|য়|য়ের|বলে|টি|গুলি)?(?![ঀ-৿])"
 )
 _RE_DEFINITION = re.compile(

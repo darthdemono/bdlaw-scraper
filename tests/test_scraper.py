@@ -158,7 +158,13 @@ class TestConvertLists:
         out = _linkify_section_refs("sections 3 and 4 years", "11", {"3", "4"})
         assert "[[act-11#^sec-3" in out and "sec-4" not in out
 
-    def test_inserted_and_doubled_markers_are_list_items(self):
+    def test_a_list_item_number_on_the_next_line_is_not_a_section(self):
+        from bdlaw_scraper.scraper import _linkify_section_refs
+
+        text = "1. commits a breach of a rule made under section 2, or\n2. imports without a licence under section 3, or\n3. breaks a condition"
+        out = _linkify_section_refs(text, "114", {"2", "3"})
+        assert "\n2. imports" in out and "\n3. breaks" in out
+        assert out.count("sec-2") == 1 and out.count("sec-3") == 1
         from bdlaw_scraper.scraper import _classify_item, _item_marker
 
         assert _classify_item("(3B) text") == "decimal" and _item_marker("(3B) text") == "(3B)"
