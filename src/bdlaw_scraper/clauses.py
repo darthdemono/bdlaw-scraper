@@ -60,6 +60,7 @@ def nest_inserted_clauses(md: str) -> str:
     base = ""        # digits of the last plain top-level clause
     inserted = False  # inside an indented inserted clause: its own children move in too
     k = 0
+    kids = False
     for line in lines:
         m = _RE_LIST_LINE.match(line)
         if m and not m.group(1):
@@ -67,7 +68,9 @@ def nest_inserted_clauses(md: str) -> str:
             pm = _RE_PLAIN_NUM.match(mark)
             im = _RE_INSERTED.match(mark)
             if pm:
-                base, inserted, k = pm.group(1), False, 0
+                base, inserted, k, kids = pm.group(1), False, 0, False
+            elif im and im.group(1) == base and kids:
+                inserted = False  # the parent has clauses of its own: (21a) stays beside (21), not among its (a), (b)
             elif im and im.group(1) == base:
                 inserted, k = True, k + 1
                 out.append("   " + re.sub(r"^\d+\.", f"{k}.", line, count=1))
@@ -76,6 +79,10 @@ def nest_inserted_clauses(md: str) -> str:
                 base, inserted = "", False
         elif line.startswith("#"):
             base, inserted = "", False
+        elif m and base and not inserted:
+            kids = True  # an indented list line right after a plain clause: its own sub-clauses
+            out.append(line)
+            continue
         elif inserted and line.startswith("   ") and line.strip():
             out.append("   " + line)
             continue
@@ -154,6 +161,14 @@ def link_clauses(md: str, act_number: str, known: set[str]) -> str:
             if base not in known_sections:
                 return m.group(0)
             shown = m.group(0)
+        if len(levels) == 1 and len(levels[0]) > 1:
+            # "clauses (9), (12) and (38) of section 3": every clause gets its own link, then the section
+            def one(x: re.Match) -> str:
+                ident = f"{base}-{_mark_id(x.group(0).strip('()'))}"
+                return f"[[act-{act_number}#^{ident}\\|{x.group(0)}]]" if ident in known else x.group(0)
+
+            root = label if m.group("link") else m.group("plain")
+            return f"{re.sub(_MARK, one, m.group('lev'))}[[act-{act_number}#^{base}\\|{root}]]"
         return f"[[act-{act_number}#^{target(base, levels)}\\|{shown}]]"
 
     def deepen(m: re.Match) -> str:

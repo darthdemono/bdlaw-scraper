@@ -1568,6 +1568,9 @@ def _strip_outer_brackets(text: str) -> str:
     return text
 
 
+_RE_LABEL_AND = re.compile(r"^\([A-Za-z0-9]{1,4}\)\s+(?:and|or)\s")
+
+
 def _join_isolated_labels(text: str) -> str:
     """Join an isolated list label like "(a)" onto the following content line.
 
@@ -1581,12 +1584,29 @@ def _join_isolated_labels(text: str) -> str:
     out: list[str] = []
     i = 0
     while i < len(lines):
+        if _RE_LABEL_AND.match(lines[i].strip()):
+            k = len(out)
+            while k and not out[k - 1].strip():
+                k -= 1
+            if k and re.search(r"(?:,|\(\w{1,4}\),?)$", out[k - 1].rstrip()):
+                # "clauses (9), (12), (38) / (48) and (50) of section 3": one sentence, not a list item
+                out[k - 1] = out[k - 1].rstrip() + " " + lines[i].strip()
+                del out[k:]
+                i += 1
+                continue
         if _RE_ISOLATED_LABEL.match(lines[i].strip()):
             j = i + 1
             while j < len(lines) and not lines[j].strip():
                 j += 1
             if j < len(lines):
-                out.append(lines[i].strip() + " " + lines[j].strip())
+                joined = lines[i].strip() + " " + lines[j].strip()
+                while out and not out[-1].strip():
+                    out.pop()  # blank lines between the fragments
+                if out and re.search(r"(?:,|\(\w{1,4}\),?)$", out[-1].rstrip()) and re.match(r"\((?:and|or)\b", "(" + lines[j].strip()):
+                    # "clauses (9), (12), (38) / (48) / and (50) of section 3": a reference, not a list item
+                    out[-1] = out[-1].rstrip() + " " + joined
+                else:
+                    out.append(joined)
                 i = j + 1
                 continue
         out.append(lines[i])
@@ -1867,6 +1887,18 @@ def _split_heading_before_first_subclause(text: str) -> str:
     return "\n".join(lines)
 
 
+_RE_REF_CHAIN = re.compile(
+    r"(?i)\b(?:clauses?|sub-?sections?|paragraphs?|sections?|articles?|rules?)\s+(?:\([^()]{1,4}\)(?:\s*,\s*|\s+(?:and|or)\s+)?)+$"
+)
+
+
+def _inline_item_break(m: re.Match) -> str:
+    """Break a line before an inline "(b)" item, but not inside a reference like "clauses (9), (12), (38), (48)"."""
+    if _RE_REF_CHAIN.search(m.string[: m.start()]):
+        return m.group(0)
+    return (":" if m.group(2) else "") + f"\n({m.group(1) or m.group(2)})"
+
+
 def _split_inline_list_items(text: str) -> str:
     """Split inline sub-clauses like '...; (d) text' onto separate lines.
 
@@ -1877,7 +1909,7 @@ def _split_inline_list_items(text: str) -> str:
     split = "\n".join(
         line
         if line.lstrip().startswith("|")
-        else _RE_GLUED_SUBCLAUSE.sub(lambda m: "\n" + m.group(1), _RE_INLINE_ITEM_SEP.sub(lambda m: (":" if m.group(2) else "") + f"\n({m.group(1) or m.group(2)})", line))
+        else _RE_GLUED_SUBCLAUSE.sub(lambda m: "\n" + m.group(1), _RE_INLINE_ITEM_SEP.sub(_inline_item_break, line))
         for line in text.split("\n")
     )
     return _RE_MARKER_NO_SPACE.sub(r"\1 ", split)
