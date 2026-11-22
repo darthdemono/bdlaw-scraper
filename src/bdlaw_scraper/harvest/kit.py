@@ -64,6 +64,9 @@ class Polite:
                 self.robots.parse(body.splitlines())
         except Exception:
             self.robots.parse([])
+        wait = self.robots.crawl_delay(UA) or self.robots.crawl_delay("*")
+        if wait:
+            self.delay = max(self.delay, float(wait))  # the site's own Crawl-delay wins when it is longer
 
     def _wait(self) -> None:
         gap = self.delay - (time.time() - self.last)
@@ -119,7 +122,7 @@ class Polite:
                 return b""
         raise Stop(f"gave up on {url}")
 
-    def download(self, url: str, dest: Path, magic: bytes = b"%PDF") -> tuple[str, int, str]:
+    def download(self, url: str, dest: Path, magic: bytes | None = b"%PDF") -> tuple[str, int, str]:
         """A file, resumable. Returns (state, size, sha256); state is exists, ok or bad (not a PDF, too small)."""
         if dest.exists() and dest.stat().st_size > 0:
             return "exists", dest.stat().st_size, ""
@@ -154,8 +157,8 @@ class Polite:
         else:
             return "bad", 0, ""
         size = part.stat().st_size
-        head = part.open("rb").read(len(magic))
-        if size < 1024 or head != magic:
+        head = part.open("rb").read(len(magic)) if magic else b""
+        if size < (1024 if magic else 1) or (magic and head != magic):
             part.unlink()
             return "bad", size, ""
         sha = hashlib.sha256()

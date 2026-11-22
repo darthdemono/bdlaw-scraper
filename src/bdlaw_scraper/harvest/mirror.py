@@ -17,6 +17,10 @@ SOURCES = {
     "nbr": {"host": "nbr.gov.bd", "seeds": ["https://nbr.gov.bd/", "https://nbr.gov.bd/regulations/acts/vat-acts/eng"], "follow": True, "delay": 1.5,
             "follow_re": r"nbr\.gov\.bd/(regulations|laws|acts|sro|rules|circular|order)"},
     "bb": {"host": "www.bb.org.bd", "seeds": ["https://www.bb.org.bd/en/index.php/mediaroom/circular"], "follow": False, "delay": 2.0},
+    "datagov": {"host": "data.gov.bd", "seeds": ["https://data.gov.bd/dataset?query=&sort_by=changed&sort_order=DESC&page=0"], "follow": True, "delay": 10.0,
+                "paged_n": "https://data.gov.bd/dataset?query=&sort_by=changed&sort_order=DESC&page={n}",
+                "follow_re": r"data\.gov\.bd/dataset/[^/?#]+(/resource/[^/?#]+)?$",
+                "exts": ["csv", "xls", "xlsx", "json", "xml", "pdf", "zip", "doc", "docx", "ods"]},
     "dppold": {"host": "www.dpp.gov.bd", "paged": "https://www.dpp.gov.bd/bgpress/index.php/document/gazettes/{t}/publication_date/{o}", "types": [1, 2], "step": 15, "follow": True, "delay": 1.5,
                "follow_re": r"/document/(get_extraordinary|get_gazette_part)/"},
     "bdcode": {"host": "bdcode.gov.bd", "seeds": ["https://bdcode.gov.bd/", "https://bdcode.gov.bd/about-bangladesh-code.html",
@@ -57,13 +61,17 @@ def crawl(http: Polite, con, cfg: dict, st: Status) -> None:
             full = urldefrag(urljoin(url, href))[0]
             if re.search(r"[\s<>\"\\{}|^`]|[\x00-\x1f]", full):
                 continue  # code or markup that leaked into an href, not a link
-            if full.lower().endswith(".pdf"):
+            exts = tuple("." + e for e in cfg.get("exts", ["pdf"]))
+            if full.lower().split("?")[0].endswith(exts):
                 con.execute("INSERT OR IGNORE INTO files (url,found_on) VALUES (?,?)", (full, url))
             elif cfg["follow"] and urlparse(full).netloc.endswith(cfg["host"]) and depth < 3 and not re.search(r"\.(css|js|png|jpe?g|gif|ico|zip)$", full, re.I):
                 if cfg.get("follow_re") and not re.search(cfg["follow_re"], full):
                     continue
                 cur = con.execute("INSERT OR IGNORE INTO pages (url,depth) VALUES (?,?)", (full, depth + 1))
                 fresh += cur.rowcount
+        pn = re.search(r"[?&]page=(\d+)$", url) if cfg.get("paged_n") else None
+        if pn and fresh:  # a list page that still brought new datasets: ask for the next one
+            con.execute("INSERT OR IGNORE INTO pages (url,depth) VALUES (?,0)", (cfg["paged_n"].format(n=int(pn.group(1)) + 1),))
         m = re.search(r"/document/gazettes/(\d+)/publication_date/(\d+)$", url) if cfg.get("paged") else None
         if m and re.search(cfg["follow_re"], page):  # a list page with records: ask for the next offset
             con.execute("INSERT OR IGNORE INTO pages (url,depth) VALUES (?,0)", (cfg["paged"].format(t=m.group(1), o=int(m.group(2)) + cfg["step"]),))
@@ -80,7 +88,7 @@ def download(http: Polite, con, root: Path, st: Status) -> None:
     for i, (url,) in enumerate(todo):
         p = urlparse(url)
         dest = root / "pdf" / p.netloc / re.sub(r"[^\w.\-/]+", "_", p.path.lstrip("/"))
-        state, size, sha = http.download(url, dest)
+        state, size, sha = http.download(url, dest, magic=b"%PDF" if url.lower().split("?")[0].endswith(".pdf") else None)
         con.execute("UPDATE files SET state=?, path=?, size=?, sha256=COALESCE(NULLIF(?,''),sha256), tries=tries+? WHERE url=?",
                     ("ok" if state in ("ok", "exists") else "bad", str(dest) if state != "bad" else None, size, sha, 1 if state == "bad" else 0, url))
         if i % 25 == 0:
