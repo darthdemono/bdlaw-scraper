@@ -833,3 +833,12 @@ def test_a_sub_clause_marker_without_a_space_is_a_list_item():
     assert _split_inline_list_items("(1)The Government may act.") == "(1) The Government may act."
     # a sentence that merely mentions a clause is untouched
     assert _split_inline_list_items("See Art. 5(3) of the Act. Then (a) applies.") == "See Art. 5(3) of the Act. Then (a) applies."
+
+
+def test_a_footnote_number_glued_to_a_heading_becomes_a_reference():
+    from bdlaw_scraper.scraper import _unglue_footnote
+
+    assert _unglue_footnote("84Part IXA") == ("Part IXA", "[^84]")
+    assert _unglue_footnote("32Chapter I") == ("Chapter I", "[^32]")
+    assert _unglue_footnote("Part I") == ("Part I", "")
+    assert _unglue_footnote("3A") == ("3A", "")

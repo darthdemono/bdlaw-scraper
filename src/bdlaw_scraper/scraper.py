@@ -370,6 +370,16 @@ _RE_ANNOTATION_BRACKETS_PREAMBLE = re.compile(r"(?<!\[)\[(?!\[)(?!\*\s*\*)([^\[\
 _RE_BDLAWS_ACT = re.compile(r"https?://bdlaws\.minlaw\.gov\.bd/act-(\d+)\.html")
 # A Bengali case ending the source leaves outside the link anchor ("সংবিধান</a>ের"). A dependent vowel sign cannot
 # start a word, so the ending belongs inside the link text: "[[..|সংবিধানের]]".
+# A footnote number the source glues to the front of a heading ("84Part IXA", "32Chapter I"): it is the reference
+# to the footnote, not part of the name. Returns the text without it and the "[^84]" reference ("" when none).
+_RE_GLUED_FOOTNOTE = re.compile(r"^(\d{1,3})(?=[A-Za-z]{4})")
+
+
+def _unglue_footnote(text: str) -> tuple[str, str]:
+    m = _RE_GLUED_FOOTNOTE.match(text)
+    return (text[m.end() :], f"[^{m.group(1)}]") if m else (text, "")
+
+
 _RE_CASE_ENDING = re.compile(r"[ি-ৌ][ঀ-৿]*(?![ঀ-৿])")
 
 
@@ -1261,11 +1271,11 @@ def parse_detail(soup: BeautifulSoup, base: str) -> Generator[DocNode, None, Non
             no_p = part_group.find("p", class_="act-part-no")
             link = no_p.find("a") if no_p else part_group.find("a")
             if link and link.get("href"):
-                part_num = _normalise(link.get_text(strip=True))
+                part_num, part_ref = _unglue_footnote(_normalise(link.get_text(strip=True)))
                 part_url = urljoin(base, link["href"])
                 name_p = part_group.find("p", class_="act-part-name")
                 subtitle = _normalise(name_p.get_text(strip=True)) if name_p else ""
-                full_name = f"{part_num}: {subtitle}" if subtitle else part_num
+                full_name = (f"{part_num}: {subtitle}" if subtitle else part_num) + part_ref
                 yield PartItem(name=full_name, url=part_url)
 
         chapter_group = row.find("div", class_="act-chapter-group")
@@ -1273,14 +1283,14 @@ def parse_detail(soup: BeautifulSoup, base: str) -> Generator[DocNode, None, Non
             chap_no_p = row.find("p", class_="act-chapter-no")
             chap_name_p = row.find("p", class_="act-chapter-name")
             if chap_no_p:
-                chap_no = _normalise(chap_no_p.get_text(strip=True))
+                chap_no, chap_ref = _unglue_footnote(_normalise(chap_no_p.get_text(strip=True)))
                 chap_name = (
                     _normalise(chap_name_p.get_text(strip=True)) if chap_name_p else ""
                 )
                 glued = re.match(r"^(\d{1,3})(?=[ঀ-৿])", chap_name)
                 if glued:
                     chap_name = chap_name[glued.end():] + f"[^{glued.group(1)}]"
-                full_chap = f"{chap_no}: {chap_name}" if chap_name else chap_no
+                full_chap = (f"{chap_no}: {chap_name}" if chap_name else chap_no) + chap_ref
                 yield ChapterItem(name=full_chap)
 
         for sec_head in row.find_all("p", class_="act-section-head"):
@@ -3168,8 +3178,11 @@ def build_markdown(
         elif isinstance(node, PartItem):
             lines.append("")
             name = _fix_omission_marks(node.name)
+            ref = re.search(r"\[\^\d+\]$", name)
             if node.url in ("", "#") and "[" in name:
                 lines.append(f"## {name}")  # a footnote reference inside a link label does not parse
+            elif ref:
+                lines.append(f"## [{name[: ref.start()]}]({node.url}){ref.group(0)}")
             else:
                 lines.append(f"## [{name}]({node.url})")
             lines.append("")
