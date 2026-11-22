@@ -46,3 +46,11 @@ def test_bengali_markers_and_references_work_the_same_way():
     assert "ক্ষমতা ^sec-5-1" in out and "প্রথম ^sec-5-1-a" in out
     assert "[[act-9#^sec-5-1\\|উপ-ধারা (১)]]" in out
     assert "[[act-9#^sec-5-1-a\\|ধারা ৫(১)(ক)]]" in out
+
+def test_front_matter_is_never_linked():
+    from bdlaw_scraper.clauses import anchor_and_link
+
+    md = '---\ntitle: "T"\ndescription: "See clause (1) of Article 5 of the Act."\n---\n\n##### [Section 5: X](u) ^sec-5\n\n1. <!--n:(1)--> First.\n2. <!--n:(2)--> See clause (1) of Article 5.\n'
+    out = anchor_and_link(md, "1")
+    assert out.split("---")[1].count("[[") == 0
+    assert "[[act-1#^sec-5-1" in out

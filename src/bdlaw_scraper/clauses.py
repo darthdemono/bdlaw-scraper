@@ -134,6 +134,11 @@ def link_clauses(md: str, act_number: str, known: set[str]) -> str:
 
 
 def anchor_and_link(md: str, act_number: str) -> str:
+    # the YAML front matter is not text to link: "\|" inside its quoted description is an invalid escape
+    head = ""
+    fm = re.match(r"---\n.*?\n---\n", md, re.DOTALL)
+    if fm:
+        head, md = md[: fm.end()], md[fm.end() :]
     md, known = anchor_items(md)
     sections = set(re.findall(r"\^(sec-[a-z0-9]+)\s*$", md, flags=re.M))
-    return link_clauses(md, act_number, known | sections)
+    return head + link_clauses(md, act_number, known | sections)
