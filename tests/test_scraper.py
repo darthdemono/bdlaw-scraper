@@ -822,3 +822,14 @@ def test_a_case_ending_after_an_act_link_goes_inside_the_link():
     assert md(f"<p>{link}ে সকল</p>").startswith("[[act-957\\|গণপ্রজাতন্ত্রী বাংলাদেশের সংবিধানে]]")
     # a glued separate word is not an ending
     assert md(f"<p>{link}রহিতক্রমে</p>") == "[[act-957\\|গণপ্রজাতন্ত্রী বাংলাদেশের সংবিধান]]রহিতক্রমে"
+
+
+def test_a_sub_clause_marker_without_a_space_is_a_list_item():
+    from bdlaw_scraper.scraper import _split_inline_list_items
+
+    # glued to the sentence before it, with an amendment footnote mark
+    assert _split_inline_list_items("(2) Measures. [^18](3)The State shall endeavour.") == "(2) Measures.\n[^18](3) The State shall endeavour."
+    # the marker alone at the start of a line
+    assert _split_inline_list_items("(1)The Government may act.") == "(1) The Government may act."
+    # a sentence that merely mentions a clause is untouched
+    assert _split_inline_list_items("See Art. 5(3) of the Act. Then (a) applies.") == "See Art. 5(3) of the Act. Then (a) applies."

@@ -1807,6 +1807,11 @@ def _extract_item_content(line: str) -> str:
 _RE_INLINE_ITEM_SEP = re.compile(
     r"\s*[;,]\s+(?:(?:and|or)\s+)?\(([a-zA-Z]|\d+)\)(?=\s)",
 )
+# An amended sub-clause glued to the sentence before it: "...Republic. [18](3)The State shall ...". The footnote
+# mark (if any) and "(3)" start a new line; the capital letter right after the bracket marks it as a clause.
+# "(3)The State ..." at the start of a line: the marker has no space after it, so give it one and it reads as a list item.
+_RE_MARKER_NO_SPACE = re.compile(r"(?m)^((?:\[\^?\d+\][ \t]*)?\((?:\d+[A-Za-z]{0,2}|[a-z])\))(?=[A-Z“\"])")
+_RE_GLUED_SUBCLAUSE = re.compile(r"(?<=[.;:])[ \t]+((?:\[\^?\d+\][ \t]*)?\((?:[a-z]|\d+)\))(?=[A-Z])")
 
 
 # A quoted new section runs its title and first sub-clause together: "77A. Title.-(1) text".
@@ -1842,12 +1847,13 @@ def _split_inline_list_items(text: str) -> str:
     or commas, e.g. '...unsound mind ; (d) is or is deemed... ; and (e) has not...'
     """
     # Table rows must stay on one line: a newline inside a cell would break the row.
-    return "\n".join(
+    split = "\n".join(
         line
         if line.lstrip().startswith("|")
-        else _RE_INLINE_ITEM_SEP.sub(lambda m: f"\n({m.group(1)})", line)
+        else _RE_GLUED_SUBCLAUSE.sub(lambda m: "\n" + m.group(1), _RE_INLINE_ITEM_SEP.sub(lambda m: f"\n({m.group(1)})", line))
         for line in text.split("\n")
     )
+    return _RE_MARKER_NO_SPACE.sub(r"\1 ", split)
 
 
 def _join_sentence_continuations(text: str) -> str:
