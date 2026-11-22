@@ -807,3 +807,18 @@ def test_act_title_drops_footnote_digit_and_stray_brackets(h3, title, num):
     soup = BeautifulSoup(f'<section class="bg-act-section"><h3>{h3}</h3></section>', "html.parser")
     assert parse_act_title(soup) == title
     assert _extract_title_footnote_num(soup) == num
+
+
+def test_a_case_ending_after_an_act_link_goes_inside_the_link():
+    from bs4 import BeautifulSoup
+
+    from bdlaw_scraper.scraper import _tag_to_md_text
+
+    def md(html):
+        return _tag_to_md_text(BeautifulSoup(html, "html.parser").p).strip()
+
+    link = '<a href="http://bdlaws.minlaw.gov.bd/act-957.html">গণপ্রজাতন্ত্রী বাংলাদেশের সংবিধান</a>'
+    assert md(f"<p>যেহেতু {link}ের ৮৫ অনুচ্ছেদ</p>") == "যেহেতু [[act-957\\|গণপ্রজাতন্ত্রী বাংলাদেশের সংবিধানের]] ৮৫ অনুচ্ছেদ"
+    assert md(f"<p>{link}ে সকল</p>").startswith("[[act-957\\|গণপ্রজাতন্ত্রী বাংলাদেশের সংবিধানে]]")
+    # a glued separate word is not an ending
+    assert md(f"<p>{link}রহিতক্রমে</p>") == "[[act-957\\|গণপ্রজাতন্ত্রী বাংলাদেশের সংবিধান]]রহিতক্রমে"

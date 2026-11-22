@@ -368,6 +368,24 @@ _RE_ISOLATED_LABEL = re.compile(
 )
 _RE_ANNOTATION_BRACKETS_PREAMBLE = re.compile(r"(?<!\[)\[(?!\[)(?!\*\s*\*)([^\[\]]*)\](?!\])", re.DOTALL)  # never a [[wikilink]]
 _RE_BDLAWS_ACT = re.compile(r"https?://bdlaws\.minlaw\.gov\.bd/act-(\d+)\.html")
+# A Bengali case ending the source leaves outside the link anchor ("সংবিধান</a>ের"). A dependent vowel sign cannot
+# start a word, so the ending belongs inside the link text: "[[..|সংবিধানের]]".
+_RE_CASE_ENDING = re.compile(r"[ি-ৌ][ঀ-৿]*(?![ঀ-৿])")
+
+
+def _act_link_ending(node: object) -> int:
+    """Length of the case ending that follows an act link and belongs inside it, else 0."""
+    nxt = getattr(node, "next_sibling", None)
+    if not isinstance(nxt, NavigableString):
+        return 0
+    m = _RE_CASE_ENDING.match(str(nxt))
+    return m.end() if m else 0
+
+
+def _is_act_link(node: object) -> bool:
+    if getattr(node, "name", None) != "a":
+        return False
+    return bool(_RE_BDLAWS_ACT.match(urljoin(BASE_URL, str(node.get("href", "")))))  # type: ignore[attr-defined]
 _RE_FN_PREFIX = re.compile(r"^(\[\^\d+\])")
 _RE_RESIDUAL_HTML = re.compile(r"</?(li|ol|ul|p|div|span|br)[^>]*>", re.IGNORECASE)
 
@@ -781,7 +799,11 @@ def _tag_to_md_text(node: object, scraper: Optional[Scraper] = None) -> str:
     @return         Markdown string representation of the node subtree.
     """
     if isinstance(node, NavigableString):
-        return unicodedata.normalize("NFC", str(node))
+        s = str(node)
+        prev = node.previous_sibling
+        if prev is not None and _is_act_link(prev):
+            s = s[_act_link_ending(prev) :]
+        return unicodedata.normalize("NFC", s)
     if not hasattr(node, "name") or not node.name:
         return ""
     if node.name == "br":
@@ -797,6 +819,9 @@ def _tag_to_md_text(node: object, scraper: Optional[Scraper] = None) -> str:
             m = _RE_BDLAWS_ACT.match(full_href)
             if m:
                 clean_text = re.sub(r"[\].]+$", "", text).strip()
+                end = _act_link_ending(node)
+                if end:
+                    clean_text += str(node.next_sibling)[:end]  # type: ignore[union-attr]
                 return f"[[act-{m.group(1)}\\|{clean_text}]]"
             if re.fullmatch(r"\d+", text):
                 return f"[{text}]"
