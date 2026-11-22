@@ -842,3 +842,12 @@ def test_a_footnote_number_glued_to_a_heading_becomes_a_reference():
     assert _unglue_footnote("32Chapter I") == ("Chapter I", "[^32]")
     assert _unglue_footnote("Part I") == ("Part I", "")
     assert _unglue_footnote("3A") == ("3A", "")
+
+
+def test_two_sections_omitted_together_share_one_numbered_heading():
+    from bdlaw_scraper.scraper import _secnum_to_block_id, _strip_leading_section_num, extract_section_number
+
+    assert extract_section_number("23.-24. [Omitted by section 3 of the Act.]") == "23-24"
+    assert _strip_leading_section_num("23.-24. [Omitted by section 3]").startswith("[Omitted")
+    assert _secnum_to_block_id("23-24") == "23-24"
+    assert extract_section_number("24. Omitted") == "24"

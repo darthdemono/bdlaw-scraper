@@ -302,6 +302,8 @@ RE_BN_DECIMAL_ITEM = re.compile(r"^\(([০-৯]+[" + _BN_CONS + r"]{0,2})\)\s+(.
 RE_BN_VOWEL_ITEM = re.compile(r"^\(([" + _BN_VOWELS + r"])\)\s+(.*)", re.DOTALL)
 
 _SECNUM_CORE = r"[A-Za-z0-9]+(?:-[A-Za-z0-9]+)?(?:\.[A-Za-z0-9]+)?"
+# "23.-24. [Omitted]": two sections omitted together share one heading (the site prints "-24. [Omitted]" as its title)
+RE_SECTION_NUM_RANGE = re.compile(r"^(\d+[A-Za-z]{0,2})\.\s*[-–]\s*(\d+[A-Za-z]{0,2})\.(?=\s|$|[\[(])\s*")
 RE_SECTION_NUM_BRACKET = re.compile(rf"^\[({_SECNUM_CORE})\s*\.\s*\]?\s*")
 RE_SECTION_NUM_PLAIN = re.compile(rf"^({_SECNUM_CORE})\.(?:\s+|$)")
 RE_SECTION_NUM_CLAUSE = re.compile(rf"^({_SECNUM_CORE})\.[\(\[]([A-Za-z0-9]+)[\)\]]")
@@ -873,6 +875,8 @@ def _secnum_to_block_id(num: str) -> str:
     @param num  Raw section number string (may contain Bengali digits/letters).
     @return     Lowercase ASCII block ID suitable for ^sec-<id> anchors.
     """
+    if re.fullmatch(r"\d+[A-Za-z]{0,2}-\d+[A-Za-z]{0,2}", num):
+        return num.lower()  # a range of sections keeps its hyphen: "23-24"
     result = num.translate(BENGALI_DIGIT_MAP)
     result = "".join(_BN_LETTER_TO_LATIN.get(ch, ch) for ch in result)
     return re.sub(r"[^a-z0-9]", "", result.lower())
@@ -897,6 +901,9 @@ def extract_section_number(raw_text: str) -> Optional[str]:
     stripped = re.sub(r"^[.\s]+", "", cleaned.lstrip())
     if stripped.startswith("[") and stripped.endswith("]"):
         stripped = stripped[1:-1].lstrip()
+    rng = RE_SECTION_NUM_RANGE.match(stripped)
+    if rng:
+        return f"{rng.group(1)}-{rng.group(2)}"
     for pat in (
         RE_BN_SECTION_NUM_BRACKET,
         RE_BN_SECTION_NUM_PLAIN,
@@ -1321,6 +1328,9 @@ def parse_detail(soup: BeautifulSoup, base: str) -> Generator[DocNode, None, Non
                 heading = ""
             raw_text = _get_text(details_div)
             number = extract_section_number(raw_text)
+            rng = re.fullmatch(r"\d+[A-Za-z]{0,2}-(\d+[A-Za-z]{0,2})", number or "")
+            if rng:
+                heading = re.sub(rf"^[-–]\s*{rng.group(1)}\.\s*", "", heading)
             if number:
                 last_section_num = number
             if not _is_boilerplate(raw_text):
@@ -1506,6 +1516,9 @@ def _strip_leading_section_num(text: str) -> str:
     stripped = re.sub(r"^[.\s]+", "", stripped)
 
     def _try_strip(s: str) -> Optional[str]:
+        rng = RE_SECTION_NUM_RANGE.match(s)
+        if rng:
+            return s[rng.end() :]
         for pat in (RE_BN_SECTION_NUM_BRACKET, RE_BN_SECTION_NUM_PLAIN):
             m = pat.match(s)
             if m:
@@ -3219,6 +3232,8 @@ def build_markdown(
                         if language == "bn"
                         else ("Article" if "/Article-" in node.url else "Section")
                     )
+                    if language != "bn" and re.fullmatch(r"\d+[A-Za-z]{0,2}-\d+[A-Za-z]{0,2}", node.number):
+                        term += "s"
                     heading_text = (
                         f"{term} {node.number}: {node.heading}"
                         if node.heading
@@ -3267,7 +3282,9 @@ def build_markdown(
             lines.append("")
 
     text = _fix_bengali_ocr(_restart_callout_lists(_plain_undefined_refs("\n".join(lines))))
-    return _final_cleanup(text)
+    from bdlaw_scraper.clauses import anchor_and_link
+
+    return _final_cleanup(anchor_and_link(text, act_number))
 
 
 def _final_cleanup(md: str) -> str:
