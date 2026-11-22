@@ -107,6 +107,8 @@ class Polite:
                 time.sleep(2 ** (attempt + 1))
             except (urllib.error.URLError, TimeoutError, ConnectionError):
                 time.sleep(2 ** (attempt + 1))
+            except ValueError:  # an invalid URL (http.client.InvalidURL is one): nothing to fetch
+                return b""
         raise Stop(f"gave up on {url}")
 
     def download(self, url: str, dest: Path, magic: bytes = b"%PDF") -> tuple[str, int, str]:

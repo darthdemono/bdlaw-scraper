@@ -51,6 +51,8 @@ def crawl(http: Polite, con, cfg: dict, st: Status) -> None:
         fresh = 0
         for href in _RE_HREF.findall(page):
             full = urldefrag(urljoin(url, href))[0]
+            if re.search(r"[\s<>\"\\{}|^`]|[\x00-\x1f]", full):
+                continue  # code or markup that leaked into an href, not a link
             if full.lower().endswith(".pdf"):
                 con.execute("INSERT OR IGNORE INTO files (url,found_on) VALUES (?,?)", (full, url))
             elif cfg["follow"] and urlparse(full).netloc.endswith(cfg["host"]) and depth < 3 and not re.search(r"\.(css|js|png|jpe?g|gif|ico|zip)$", full, re.I):
