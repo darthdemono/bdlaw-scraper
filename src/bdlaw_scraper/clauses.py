@@ -74,7 +74,7 @@ def nest_inserted_clauses(md: str) -> str:
                 base, inserted, k, kids = pm.group(1), False, 0, False
             elif im and im.group(1) == base:
                 inserted, k = True, k + 1
-                pad = "      " if kids else "   "  # a parent with its own (a), (b): the inserted run goes under the last of them
+                pad = "   "  # always inside its number: (21a) is a clause of (21), beside its (a), (b)
                 out.append(pad + re.sub(r"^\d+\.", f"{k}.", line, count=1))
                 continue
             else:
@@ -86,7 +86,7 @@ def nest_inserted_clauses(md: str) -> str:
             out.append(line)
             continue
         elif inserted and line.startswith("   ") and line.strip():
-            out.append(("      " if kids else "   ") + line)
+            out.append("   " + line)
             continue
         elif line.strip() and not line.startswith(" "):
             inserted = False
@@ -212,6 +212,9 @@ def anchor_and_link(md: str, act_number: str) -> str:
     fm = re.match(r"---\n.*?\n---\n", md, re.DOTALL)
     if fm:
         head, md = md[: fm.end()], md[fm.end() :]
+    # The real marker sits in the comment. A list item numbered 10 or more is 4 characters wide ("23. "), so its
+    # 3-space children would not nest; number every item "1." and the indent is always enough.
+    md = re.sub(r"(?m)^(\s*)\d+\. (<!--n:)", r"\g<1>1. \2", md)
     md, known = anchor_items(nest_inserted_clauses(md))
     sections = set(re.findall(r"\^(sec-[a-z0-9]+)\s*$", md, flags=re.M))
     md = link_clauses(md, act_number, known | sections)
