@@ -38,19 +38,22 @@ _RE_INSERTED = re.compile(r"^(\d+)[a-z]{1,2}$")
 _RE_PLAIN_NUM = re.compile(r"^(\d+)$")
 
 
-def _inserted_of(mark: str, lines: list[str], i: int, depth: int) -> bool:
-    """True when this item is an inserted clause ("1a") nested directly in its parent clause ("1")."""
+def _inserted_of(mark: str, lines: list[str], i: int, depth: int) -> int | None:
+    """Depth of the clause ("21") this inserted clause ("21a") belongs to, or None when it is not an inserted clause."""
     m = _RE_INSERTED.match(mark)
     if not m:
-        return False
+        return None
     for j in range(i - 1, -1, -1):
         p = _RE_LIST_LINE.match(lines[j])
-        if p and len(p.group(1)) // 3 == depth - 1:
+        if p and len(p.group(1)) // 3 < depth:
             pm = _RE_INSERTED.match(p.group(2)) or _RE_PLAIN_NUM.match(p.group(2))
-            return bool(pm) and pm.group(1) == m.group(1)
+            if pm and pm.group(1) == m.group(1):
+                return len(p.group(1)) // 3
+            if len(p.group(1)) // 3 == 0:
+                return None
         if lines[j].startswith("#"):
             break
-    return False
+    return None
 
 
 def nest_inserted_clauses(md: str) -> str:
@@ -69,11 +72,10 @@ def nest_inserted_clauses(md: str) -> str:
             im = _RE_INSERTED.match(mark)
             if pm:
                 base, inserted, k, kids = pm.group(1), False, 0, False
-            elif im and im.group(1) == base and kids:
-                inserted = False  # the parent has clauses of its own: (21a) stays beside (21), not among its (a), (b)
             elif im and im.group(1) == base:
                 inserted, k = True, k + 1
-                out.append("   " + re.sub(r"^\d+\.", f"{k}.", line, count=1))
+                pad = "      " if kids else "   "  # a parent with its own (a), (b): the inserted run goes under the last of them
+                out.append(pad + re.sub(r"^\d+\.", f"{k}.", line, count=1))
                 continue
             else:
                 base, inserted = "", False
@@ -84,7 +86,7 @@ def nest_inserted_clauses(md: str) -> str:
             out.append(line)
             continue
         elif inserted and line.startswith("   ") and line.strip():
-            out.append("   " + line)
+            out.append(("      " if kids else "   ") + line)
             continue
         elif line.strip() and not line.startswith(" "):
             inserted = False
@@ -116,8 +118,9 @@ def anchor_items(md: str) -> tuple[str, set[str]]:
         hidden = {d for d in hidden if d < depth}
         mark = _mark_id(m.group(2))
         stack[depth] = mark
-        if depth and _inserted_of(m.group(2), lines, i, depth):
-            hidden.add(depth - 1)  # (1a) sits inside (1) but keeps the id "1a"
+        pd = _inserted_of(m.group(2), lines, i, depth) if depth else None
+        if pd is not None:
+            hidden.update(range(pd, depth))  # (1a) sits inside (1) but keeps the id "1a"
         if not mark or any(d not in stack for d in range(depth)) or _RE_HAS_ID.search(line):
             continue
         nxt = lines[i + 1] if i + 1 < len(lines) else ""
