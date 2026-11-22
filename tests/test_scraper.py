@@ -851,3 +851,23 @@ def test_two_sections_omitted_together_share_one_numbered_heading():
     assert _strip_leading_section_num("23.-24. [Omitted by section 3]").startswith("[Omitted")
     assert _secnum_to_block_id("23-24") == "23-24"
     assert extract_section_number("24. Omitted") == "24"
+
+
+def test_act_number_and_year_become_metadata():
+    from bs4 import BeautifulSoup
+
+    from bdlaw_scraper.scraper import _build_yaml_frontmatter, _ref_aliases, _roman_to_int, parse_act_ref
+
+    def ref(h4):
+        return parse_act_ref(BeautifulSoup(f'<section class="bg-act-section"><h3>T</h3><h4>{h4}</h4></section>', "html.parser"))
+
+    assert ref("( ACT NO. VIII OF 1851 )") == {"kind": "Act", "no": "VIII", "value": 8, "year": 1851, "citation": "Act No. VIII of 1851"}
+    assert ref("( Ordinance NO. VI OF 1943 )")["citation"] == "Ordinance No. VI of 1943"
+    assert ref("( PRESIDENT'S ORDER NO. 28 OF 1973 )")["citation"] == "President's Order No. 28 of 1973"
+    assert ref("(BENGAL REGULATION XIX OF 1810)")["citation"] == "Bengal Regulation No. XIX of 1810"
+    assert ref("( ২০১২ সনের ২৭ নং আইন )") == {"kind": "Act", "no": "27", "value": 27, "year": 2012, "citation": "Act No. 27 of 2012"}
+    assert ref("( ২০২৫ সনের ১৩ নং অধ্যাদেশ )")["kind"] == "Ordinance"
+    assert ref("no number here") is None and _roman_to_int("XLV") == 45
+    assert "VIII of 1851" in _ref_aliases(ref("( ACT NO. VIII OF 1851 )")) and "8 of 1851" in _ref_aliases(ref("( ACT NO. VIII OF 1851 )"))
+    fm = _build_yaml_frontmatter("The X Act, 1851", "u", ["Legal"], act_number="1", act_ref=ref("( ACT NO. VIII OF 1851 )"))
+    assert 'act_citation: "Act No. VIII of 1851"' in fm and "act_no_value: 8" in fm and "aliases:" in fm

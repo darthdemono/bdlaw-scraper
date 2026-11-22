@@ -2994,6 +2994,63 @@ def _clean_field(text: str) -> str:
     return _fix_omission_marks(" ".join(text.split()))
 
 
+# The number the act is cited by: "Act No. VIII of 1851", "Ordinance No. VI of 1943", "২০১২ সনের ২৭ নং আইন". Lawyers refer to
+# an act by number and year far more often than by its bdlaws id, so it is kept as metadata.
+_RE_REF_EN = re.compile(
+    r"^\(?\s*((?:EAST\s+BENGAL|EAST\s+PAKISTAN|BENGAL|ACTING\s+PRESIDENT'?S|PRESIDENT'?S)\s+)?(ACT|ORDINANCE|REGULATION|ORDER)\s*(?:NO\.?)?\s*"
+    r"([IVXLCDM]+|[0-9]+|[০-৯]+)\s+OF\s+([0-9০-৯]{4})\s*\)?$",
+    re.IGNORECASE,
+)
+_RE_REF_BN = re.compile(r"^\(?\s*([০-৯]{4})\s*সনের\s*([০-৯]+)\s*নং\s*(\S+?)\s*\)?$")
+_ROMAN = {"I": 1, "V": 5, "X": 10, "L": 50, "C": 100, "D": 500, "M": 1000}
+
+
+def _roman_to_int(s: str) -> Optional[int]:
+    s = s.upper()
+    if not s or any(ch not in _ROMAN for ch in s):
+        return None
+    total = 0
+    for i, ch in enumerate(s):
+        v = _ROMAN[ch]
+        total += -v if i + 1 < len(s) and _ROMAN[s[i + 1]] > v else v
+    return total
+
+
+def parse_act_ref(soup: BeautifulSoup) -> Optional[dict]:
+    """The "Act No. X of Y" line under the title, as kind, printed number, numeric value, year and citation."""
+    section = soup.find("section", class_="bg-act-section")
+    h4 = section.find("h4") if section else None
+    if not h4:
+        return None
+    raw = _normalise(" ".join(h4.get_text().split()))
+    m = _RE_REF_EN.match(raw)
+    if m:
+        prefix, kind, no, year = m.groups()
+        no = no.translate(BENGALI_DIGIT_MAP).upper()
+        value = int(no) if no.isdigit() else _roman_to_int(no)
+        label = " ".join(w.capitalize() for w in ((prefix or "") + kind).replace("'S", "'s").split())
+        label = label.replace("President'S", "President's")
+        year = year.translate(BENGALI_DIGIT_MAP)
+        return {"kind": label, "no": no, "value": value, "year": int(year), "citation": f"{label} No. {no} of {year}"}
+    m = _RE_REF_BN.match(raw)
+    if m:
+        year, no, kind = m.groups()
+        label = {"আইন": "Act", "অধ্যাদেশ": "Ordinance"}.get(kind, kind)
+        ay, an = year.translate(BENGALI_DIGIT_MAP), no.translate(BENGALI_DIGIT_MAP)
+        return {"kind": label, "no": an, "value": int(an), "year": int(ay), "citation": f"{label} No. {an} of {ay}"}
+    return None
+
+
+def _ref_aliases(ref: dict) -> list[str]:
+    """The ways a lawyer writes it: "Act No. VIII of 1851", "Act VIII of 1851", "VIII of 1851", and the same with 8."""
+    nos = [ref["no"]] + ([str(ref["value"])] if ref["value"] and str(ref["value"]) != ref["no"] else [])
+    out = []
+    for n in nos:
+        out += [f"{ref['kind']} No. {n} of {ref['year']}", f"{ref['kind']} {n} of {ref['year']}", f"{n} of {ref['year']}"]
+    return list(dict.fromkeys(out))
+
+
+
 def _build_yaml_frontmatter(
     act_title: str,
     act_url: str,
@@ -3003,6 +3060,7 @@ def _build_yaml_frontmatter(
     section_entries: Optional[list] = None,
     enacted_at: Optional[str] = None,
     description: str = "",
+    act_ref: Optional[dict] = None,
 ) -> str:
     """Build the YAML frontmatter block for an Obsidian Markdown file.
 
@@ -3033,6 +3091,16 @@ def _build_yaml_frontmatter(
     act_id_line = f"act_id: {act_number}\n" if act_number else ""
     enacted_line = f"enacted_at: {enacted_at}\n" if enacted_at else ""
     desc_line = f"description: {safe_desc}\n"
+    ref_block = ""
+    if act_ref:
+        ref_block = (
+            f"act_kind: {json.dumps(act_ref['kind'], ensure_ascii=False)}\n"
+            f"act_no: {json.dumps(act_ref['no'], ensure_ascii=False)}\n"
+            + (f"act_no_value: {act_ref['value']}\n" if act_ref["value"] else "")
+            + f"act_year: {act_ref['year']}\n"
+            f"act_citation: {json.dumps(act_ref['citation'], ensure_ascii=False)}\n"
+            "aliases:\n" + "".join(f"  - {json.dumps(a, ensure_ascii=False)}\n" for a in _ref_aliases(act_ref))
+        )
     if section_entries:
         sec_block = "sections:\n" + "".join(
             f"  - id: {e['id']}\n    slug: {e['slug']}\n    url: {e['url']}\n"
@@ -3049,6 +3117,7 @@ def _build_yaml_frontmatter(
         f"{act_id_line}"
         f"{year_line}"
         f"{enacted_line}"
+        f"{ref_block}"
         f"scraped_at: {scraped_at}\n"
         f"language: {language}\n"
         f"{sec_block}"
@@ -3081,6 +3150,7 @@ def build_markdown(
     title_footnote_num: Optional[int] = None,
     enacted_at: Optional[str] = None,
     description: str = "",
+    act_ref: Optional[dict] = None,
 ) -> str:
     """Assemble the complete Markdown document from a list of DocNodes.
 
@@ -3151,6 +3221,7 @@ def build_markdown(
             language=language,
             section_entries=section_entries,
             enacted_at=enacted_at,
+            act_ref=act_ref,
             description=description,
         )
     )
@@ -3390,6 +3461,7 @@ def scrape_act(
     act_url_str = f"{BASE_URL}/act-{act_number}.html"
     enacted_at = parse_act_date(toc_soup) or parse_act_date(detail_soup)
     description = parse_act_description(toc_soup) or parse_act_description(detail_soup)
+    act_ref = parse_act_ref(toc_soup) or parse_act_ref(detail_soup)
     if act_title:
         log.info("Act title: %s", act_title)
     if title_fn_num:
@@ -3438,6 +3510,7 @@ def scrape_act(
         title_footnote_num=title_fn_num,
         enacted_at=enacted_at,
         description=description,
+        act_ref=act_ref,
     )
     tmp = output.with_suffix(".md.tmp")
     tmp.write_text(md, encoding="utf-8")
@@ -3657,7 +3730,7 @@ def generate_index(output_dir: Path, index_file: Path, log: logging.Logger) -> N
         m = re.search(r"\d+", p.stem)
         return int(m.group()) if m else 0
 
-    rows: list[tuple[str, str, str, str]] = []
+    rows: list[tuple[str, str, str, str, str]] = []
     for md_file in sorted(output_dir.glob("act-*.md"), key=_sort_key):
         try:
             fm = _read_fm(md_file.read_text(encoding="utf-8"))
@@ -3667,19 +3740,20 @@ def generate_index(output_dir: Path, index_file: Path, log: logging.Logger) -> N
         title = fm.get("title", "").strip()
         year = fm.get("year", "").strip()
         desc = fm.get("description", "").strip().replace("|", "\\|")
+        cite = fm.get("act_citation", "").strip()
         if act_id and title:
-            rows.append((act_id, title, year, desc))
+            rows.append((act_id, title, year, desc, cite))
 
     lines = [
         "# Act Index",
         "",
         f"*{len(rows)} acts*",
         "",
-        "| Act Number | Year | Act Name | Description |",
-        "| --- | --- | --- | --- |",
+        "| Act Number | Year | Act Name | No. of Year | Description |",
+        "| --- | --- | --- | --- | --- |",
     ]
-    for act_id, title, year, desc in rows:
-        lines.append(f"| {act_id} | {year} | [[act-{act_id}\\|{title}]] | {desc} |")
+    for act_id, title, year, desc, cite in rows:
+        lines.append(f"| {act_id} | {year} | [[act-{act_id}\\|{title}]] | {cite} | {desc} |")
     lines.append("")
 
     index_file.write_text("\n".join(lines), encoding="utf-8")
