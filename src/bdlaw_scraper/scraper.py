@@ -308,19 +308,19 @@ RE_SECTION_NUM_BRACKET = re.compile(rf"^\[({_SECNUM_CORE})\s*\.\s*\]?\s*")
 RE_SECTION_NUM_PLAIN = re.compile(rf"^({_SECNUM_CORE})\.(?:\s+|$)")
 RE_SECTION_NUM_CLAUSE = re.compile(rf"^({_SECNUM_CORE})\.[\(\[]([A-Za-z0-9]+)[\)\]]")
 RE_BN_SECTION_NUM_PLAIN = re.compile(
-    r"^([০-৯]+[" + _BN_CONS + r"]?(?:\.[০-৯]+)?)[" + _BN_DANDA + r"]\s+"
+    r"^([০-৯]+[" + _BN_CONS + r"]?(?:\.[০-৯]+)?)\s*[" + _BN_DANDA + r"]\s+"
 )
 RE_BN_SECTION_NUM_CLAUSE = re.compile(
     r"^([০-৯]+["
     + _BN_CONS
-    + r"]?)["
+    + r"]?)\s*["
     + _BN_DANDA
     + r"][\(\[]([০-৯"
     + _BN_CONS
     + r"]+)[\)\]]"
 )
 RE_BN_SECTION_NUM_BRACKET = re.compile(
-    r"^\[([০-৯]+[" + _BN_CONS + r"]?(?:\.[০-৯]+)?)[" + _BN_DANDA + r"]\]?\s*"
+    r"^\[([০-৯]+[" + _BN_CONS + r"]?(?:\.[০-৯]+)?)\s*[" + _BN_DANDA + r"]\]?\s*"
 )
 
 RE_SUBCHAPTER_HEAD = re.compile(r"^([A-Z])\.\s*-\s*(.+)$")
@@ -1594,6 +1594,9 @@ def _join_isolated_labels(text: str) -> str:
     return "\n".join(out)
 
 
+_RE_OMITTED_LINE = re.compile(r"^(?:\[\^\d+\]\s*)*\[\s*\*\s*\*\s*\*\s*\]$")
+
+
 def _is_block_break(s: str) -> bool:
     """Return True if the line starts a new logical block that should not be merged.
 
@@ -1604,7 +1607,8 @@ def _is_block_break(s: str) -> bool:
     @return   True if the line starts a new block.
     """
     return bool(
-        s.startswith("**")
+        _RE_OMITTED_LINE.match(s)
+        or s.startswith("**")
         or s.startswith(">")
         or s.startswith("#")
         or _classify_item(s) is not None
@@ -1828,7 +1832,7 @@ def _extract_item_content(line: str) -> str:
 
 
 _RE_INLINE_ITEM_SEP = re.compile(
-    r"\s*[;,]\s+(?:(?:and|or)\s+)?\(([a-zA-Z]|\d+)\)(?=\s)",
+    r"\s*(?:[;,]\s+(?:(?:and|or)\s+)?\(([a-zA-Z]|\d+[a-z]{0,2})\)|:\s+\((\d+[a-z]{1,2})\))(?=\s)",
 )
 # An amended sub-clause glued to the sentence before it: "...Republic. [18](3)The State shall ...". The footnote
 # mark (if any) and "(3)" start a new line; the capital letter right after the bracket marks it as a clause.
@@ -1873,10 +1877,29 @@ def _split_inline_list_items(text: str) -> str:
     split = "\n".join(
         line
         if line.lstrip().startswith("|")
-        else _RE_GLUED_SUBCLAUSE.sub(lambda m: "\n" + m.group(1), _RE_INLINE_ITEM_SEP.sub(lambda m: f"\n({m.group(1)})", line))
+        else _RE_GLUED_SUBCLAUSE.sub(lambda m: "\n" + m.group(1), _RE_INLINE_ITEM_SEP.sub(lambda m: (":" if m.group(2) else "") + f"\n({m.group(1) or m.group(2)})", line))
         for line in text.split("\n")
     )
     return _RE_MARKER_NO_SPACE.sub(r"\1 ", split)
+
+
+_RE_LEADIN_FIRST = re.compile(r"^(?P<lead>\S.*?[-:–—])\s+(?P<mk>\((?:a|i|1|ক|১)\))\s+(?P<rest>\S.*)$")
+_SECOND_MARKERS = {"(b)", "(ii)", "(2)", "(খ)", "(২)"}
+
+
+def _split_leadin_first_item(text: str) -> str:
+    """'"X" means- (a) text' followed by '(b) text': the first item starts a list of its own."""
+    lines = text.split("\n")
+    for i, line in enumerate(lines):
+        m = _RE_LEADIN_FIRST.match(line)
+        if not m or line.lstrip().startswith("|"):
+            continue
+        j = i + 1
+        while j < len(lines) and not lines[j].strip():
+            j += 1
+        if j < len(lines) and _classify_item(lines[j].strip()) and _item_marker(lines[j].strip()) in _SECOND_MARKERS:
+            lines[i] = m.group("lead") + "\n" + m.group("mk") + " " + m.group("rest")
+    return "\n".join(lines)
 
 
 def _join_sentence_continuations(text: str) -> str:
@@ -2233,6 +2256,24 @@ def _convert_single_callout(
                 i += 1
             out.append(f"> [!{callout_name}]")
             out.append(f"> {content}")
+            if content.rstrip().endswith(("-", chr(0x2014), chr(0x2013), ":")):
+                # "In this section - (a) ... (b) ...": the clauses belong to the callout
+                n = 0
+                while True:
+                    j = i
+                    while j < len(lines) and not lines[j].strip():
+                        j += 1
+                    if j >= len(lines) or _classify_item(lines[j].strip()) is None:
+                        break
+                    item = lines[j].strip()
+                    mk = _item_marker(item)
+                    body = item.split(mk, 1)[1].strip() if mk and mk in item else item
+                    i = j + 1
+                    while i < len(lines) and lines[i].strip() and not _is_block_break(lines[i].strip()):
+                        body += " " + lines[i].strip()
+                        i += 1
+                    n += 1
+                    out.append(f"> {n}. <!--n:{mk}--> {body}")
         else:
             out.append(lines[i])
             i += 1
@@ -2824,6 +2865,7 @@ def html_to_markdown(
     raw = _join_isolated_labels(raw)
     raw = _split_heading_before_first_subclause(raw)
     raw = _split_inline_list_items(raw)
+    raw = _split_leadin_first_item(raw)
     raw = _join_fragment_lines(raw)
     raw = _join_sentence_continuations(raw)
     raw = _mark_omitted_repealed(raw)
@@ -3658,6 +3700,9 @@ def _scrape_all_acts(
 
     log.info("Batch complete: %d ok, %d skipped, %d failed", ok, skip, fail)
     relink_missing_acts(output_dir, log)
+    from .citations import link_folder
+
+    link_folder(output_dir, log)
     generate_index(output_dir, output_dir.parent / "act-index.md", log)
 
 
@@ -3679,7 +3724,7 @@ def relink_missing_acts(output_dir: Path, log: logging.Logger) -> int:
     @param log         Logger instance.
     @return            Number of links rewritten.
     """
-    present = {p.stem for p in output_dir.glob("act-[0-9]*.md")}
+    present = {p.stem for p in output_dir.rglob("act-[0-9]*.md")}
     changed = 0
 
     def fix(m: re.Match) -> str:
@@ -3689,7 +3734,7 @@ def relink_missing_acts(output_dir: Path, log: logging.Logger) -> int:
         changed += 1
         return f"[{m.group(2)}]({BASE_URL}/act-{m.group(1)}.html)"
 
-    for path in output_dir.glob("act-[0-9]*.md"):
+    for path in output_dir.rglob("act-[0-9]*.md"):
         text = path.read_text(encoding="utf-8")
         new = _RE_ACT_WIKILINK.sub(fix, text)
         if new != text:
@@ -3731,7 +3776,7 @@ def generate_index(output_dir: Path, index_file: Path, log: logging.Logger) -> N
         return int(m.group()) if m else 0
 
     rows: list[tuple[str, str, str, str, str]] = []
-    for md_file in sorted(output_dir.glob("act-*.md"), key=_sort_key):
+    for md_file in sorted(output_dir.rglob("act-*.md"), key=_sort_key):
         try:
             fm = _read_fm(md_file.read_text(encoding="utf-8"))
         except OSError:
