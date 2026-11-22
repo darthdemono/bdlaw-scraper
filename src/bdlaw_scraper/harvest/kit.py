@@ -96,6 +96,7 @@ class Polite:
         path = self.root / "cache" / key[:2] / key
         if cache and path.exists():
             return path.read_bytes()
+        blocked = 0
         for attempt in range(5):
             self._wait()
             try:
@@ -112,14 +113,20 @@ class Polite:
                 if e.code == 404:
                     return b""
                 if e.code in (403, 429):
-                    self.fails += 1
-                    if self.fails >= 3:
-                        raise Stop(f"{e.code} from {self.host}")
-                time.sleep(2 ** (attempt + 1))
+                    blocked = e.code
+                    time.sleep(30 * (attempt + 1))  # a single refusal is not a ban: wait and try again
+                else:
+                    time.sleep(2 ** (attempt + 1))
             except (urllib.error.URLError, TimeoutError, ConnectionError):
                 time.sleep(2 ** (attempt + 1))
             except ValueError:  # an invalid URL (http.client.InvalidURL is one): nothing to fetch
                 return b""
+        if blocked:
+            # this URL stays refused after every try: skip it; only three different URLs in a row stop the job
+            self.fails += 1
+            if self.fails >= 3:
+                raise Stop(f"{blocked} from {self.host}")
+            return b""
         raise Stop(f"gave up on {url}")
 
     def download(self, url: str, dest: Path, magic: bytes | None = b"%PDF") -> tuple[str, int, str]:
@@ -128,6 +135,7 @@ class Polite:
             return "exists", dest.stat().st_size, ""
         dest.parent.mkdir(parents=True, exist_ok=True)
         part = dest.with_name(dest.name + ".part")
+        blocked = 0
         for attempt in range(4):
             have = part.stat().st_size if part.exists() else 0
             self._wait()
@@ -148,13 +156,17 @@ class Polite:
                 if e.code == 404:
                     return "bad", 0, ""
                 if e.code in (403, 429):
-                    self.fails += 1
-                    if self.fails >= 3:
-                        raise Stop(f"{e.code} from {self.host}")
-                time.sleep(2 ** (attempt + 1))
+                    blocked = e.code
+                    time.sleep(30 * (attempt + 1))  # a single refusal is not a ban: wait and try again
+                else:
+                    time.sleep(2 ** (attempt + 1))
             except (urllib.error.URLError, TimeoutError, ConnectionError):
                 time.sleep(2 ** (attempt + 1))
         else:
+            if blocked:
+                self.fails += 1  # this file stays refused: skip it; only three different files in a row stop the job
+                if self.fails >= 3:
+                    raise Stop(f"{blocked} from {self.host}")
             return "bad", 0, ""
         size = part.stat().st_size
         head = part.open("rb").read(len(magic)) if magic else b""
