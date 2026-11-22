@@ -17,9 +17,12 @@ SOURCES = {
     "nbr": {"host": "nbr.gov.bd", "seeds": ["https://nbr.gov.bd/", "https://nbr.gov.bd/regulations/acts/vat-acts/eng"], "follow": True, "delay": 1.5,
             "follow_re": r"nbr\.gov\.bd/(regulations|laws|acts|sro|rules|circular|order)"},
     "bb": {"host": "www.bb.org.bd", "seeds": ["https://www.bb.org.bd/en/index.php/mediaroom/circular"], "follow": False, "delay": 2.0},
-    "datagov": {"host": "data.gov.bd", "seeds": ["https://data.gov.bd/dataset?query=&sort_by=changed&sort_order=DESC&page=0"], "follow": True, "delay": 10.0,
-                "paged_n": "https://data.gov.bd/dataset?query=&sort_by=changed&sort_order=DESC&page={n}",
-                "follow_re": r"data\.gov\.bd/dataset/[^/?#]+(/resource/[^/?#]+)?$",
+    "datagov": {"host": "data.gov.bd", "follow": True, "delay": 10.0,
+                "seeds": ["https://data.gov.bd/dataset?query=&sort_by=changed&sort_order=DESC&page=0",
+                          "https://data.gov.bd/dataset?query=&sort_by=changed&sort_order=DESC&page=0%2C1"],
+                "paged_n": "https://data.gov.bd/dataset?query=&sort_by=changed&sort_order=DESC&page=0%2C{n}",
+                "follow_re": r"data\.gov\.bd/dataset/[^/?#]+(/resource/[0-9a-f-]{36})?$",
+                "file_re": r"/api/download/",
                 "exts": ["csv", "xls", "xlsx", "json", "xml", "pdf", "zip", "doc", "docx", "ods"]},
     "dppold": {"host": "www.dpp.gov.bd", "paged": "https://www.dpp.gov.bd/bgpress/index.php/document/gazettes/{t}/publication_date/{o}", "types": [1, 2], "step": 15, "follow": True, "delay": 1.5,
                "follow_re": r"/document/(get_extraordinary|get_gazette_part)/"},
@@ -62,14 +65,14 @@ def crawl(http: Polite, con, cfg: dict, st: Status) -> None:
             if re.search(r"[\s<>\"\\{}|^`]|[\x00-\x1f]", full):
                 continue  # code or markup that leaked into an href, not a link
             exts = tuple("." + e for e in cfg.get("exts", ["pdf"]))
-            if full.lower().split("?")[0].endswith(exts):
+            if full.lower().split("?")[0].endswith(exts) or (cfg.get("file_re") and re.search(cfg["file_re"], full)):
                 con.execute("INSERT OR IGNORE INTO files (url,found_on) VALUES (?,?)", (full, url))
             elif cfg["follow"] and urlparse(full).netloc.endswith(cfg["host"]) and depth < 3 and not re.search(r"\.(css|js|png|jpe?g|gif|ico|zip)$", full, re.I):
                 if cfg.get("follow_re") and not re.search(cfg["follow_re"], full):
                     continue
                 cur = con.execute("INSERT OR IGNORE INTO pages (url,depth) VALUES (?,?)", (full, depth + 1))
                 fresh += cur.rowcount
-        pn = re.search(r"[?&]page=(\d+)$", url) if cfg.get("paged_n") else None
+        pn = re.search(r"[?&]page=(?:0%2C)?(\d+)$", url) if cfg.get("paged_n") else None
         if pn and fresh:  # a list page that still brought new datasets: ask for the next one
             con.execute("INSERT OR IGNORE INTO pages (url,depth) VALUES (?,0)", (cfg["paged_n"].format(n=int(pn.group(1)) + 1),))
         m = re.search(r"/document/gazettes/(\d+)/publication_date/(\d+)$", url) if cfg.get("paged") else None
