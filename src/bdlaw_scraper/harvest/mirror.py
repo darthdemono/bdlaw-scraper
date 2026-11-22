@@ -13,6 +13,8 @@ from bdlaw_scraper.harvest.kit import Polite, Status, Stop, db
 SOURCES = {
     "ain": {"host": "ain.bd", "sitemaps": ["https://ain.bd/sitemap_index.xml"], "follow": False, "delay": 1.5},
     "bdpil": {"host": "bdpil.org", "sitemaps": ["https://bdpil.org/wp-sitemap.xml"], "follow": False, "delay": 1.5},
+    "dppold": {"host": "www.dpp.gov.bd", "paged": "https://www.dpp.gov.bd/bgpress/index.php/document/gazettes/{n}", "follow": True, "delay": 1.5,
+               "follow_re": r"/document/(get_extraordinary|get_gazette_part)/"},
     "bdcode": {"host": "bdcode.gov.bd", "seeds": ["https://bdcode.gov.bd/", "https://bdcode.gov.bd/about-bangladesh-code.html",
                "https://bdcode.gov.bd/bangladesh-code-chronological-index.html", "https://bdcode.gov.bd/bangladesh-code-alphabetical-index.html"],
                "follow": True, "delay": 1.5},
@@ -36,6 +38,8 @@ def sitemap_urls(http: Polite, url: str, depth: int = 0) -> list[str]:
 def crawl(http: Polite, con, cfg: dict, st: Status) -> None:
     if not con.execute("SELECT 1 FROM pages LIMIT 1").fetchone():
         urls = [u for sm in cfg.get("sitemaps", []) for u in sitemap_urls(http, sm)] + cfg.get("seeds", [])
+        if cfg.get("paged"):
+            urls.append(cfg["paged"].format(n=1))
         con.executemany("INSERT OR IGNORE INTO pages (url) VALUES (?)", [(u,) for u in urls])
         con.commit()
     while True:
@@ -44,12 +48,19 @@ def crawl(http: Polite, con, cfg: dict, st: Status) -> None:
             return
         url, depth = row
         page = http.fetch(url).decode("utf-8", "ignore")
+        fresh = 0
         for href in _RE_HREF.findall(page):
             full = urldefrag(urljoin(url, href))[0]
             if full.lower().endswith(".pdf"):
                 con.execute("INSERT OR IGNORE INTO files (url,found_on) VALUES (?,?)", (full, url))
             elif cfg["follow"] and urlparse(full).netloc.endswith(cfg["host"]) and depth < 3 and not re.search(r"\.(css|js|png|jpe?g|gif|ico|zip)$", full, re.I):
-                con.execute("INSERT OR IGNORE INTO pages (url,depth) VALUES (?,?)", (full, depth + 1))
+                if cfg.get("follow_re") and not re.search(cfg["follow_re"], full):
+                    continue
+                cur = con.execute("INSERT OR IGNORE INTO pages (url,depth) VALUES (?,?)", (full, depth + 1))
+                fresh += cur.rowcount
+        m = re.search(r"/document/gazettes/(\d+)$", url) if cfg.get("paged") else None
+        if m and fresh:  # a list page that still brought new records: ask for the next one
+            con.execute("INSERT OR IGNORE INTO pages (url,depth) VALUES (?,0)", (cfg["paged"].format(n=int(m.group(1)) + 1),))
         con.execute("UPDATE pages SET state='done' WHERE url=?", (url,))
         done = con.execute("SELECT count(*) FROM pages WHERE state='done'").fetchone()[0]
         if done % 20 == 0:
