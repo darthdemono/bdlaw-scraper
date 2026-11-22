@@ -72,6 +72,93 @@ class Polite:
         self.last = time.time()
 
     def _open(self, url: str, data: dict | None, headers: dict | None = None):
+        parts = urllib.parse.urlsplit(url)  # a space or a non-ASCII letter in a path or query is legal in a page link, not in a request
+        url = urllib.parse.urlunsplit((parts.scheme, parts.netloc, urllib.parse.quote(parts.path, safe="/%:@!        if not self.robots.can_fetch(UA, url):'()*+,;=-._~"),
+                                       urllib.parse.quote(parts.query, safe="=&%:@!
+            raise Stop(f"robots.txt forbids {url}")
+        h = {"User-Agent": UA, **(headers or {})}
+        body = urllib.parse.urlencode(data).encode() if data else None
+        if body:
+            h["Content-Type"] = "application/x-www-form-urlencoded"
+        return urllib.request.urlopen(urllib.request.Request(url, data=body, headers=h), timeout=60)
+
+    def fetch(self, url: str, data: dict | None = None) -> bytes:
+        """A page, from the disk cache if it was ever fetched. Empty bytes for a 404."""
+        key = hashlib.sha1((url + (json.dumps(data, sort_keys=True) if data else "")).encode()).hexdigest()
+        path = self.root / "cache" / key[:2] / key
+        if path.exists():
+            return path.read_bytes()
+        for attempt in range(5):
+            self._wait()
+            try:
+                body = self._open(url, data).read()
+                self.fails = 0
+                path.parent.mkdir(parents=True, exist_ok=True)
+                tmp = path.with_suffix(".part")
+                tmp.write_bytes(body)
+                os.replace(tmp, path)
+                self.log.write(json.dumps({"t": now(), "url": url, "post": bool(data), "bytes": len(body)}) + "\n")
+                return body
+            except urllib.error.HTTPError as e:
+                if e.code == 404:
+                    return b""
+                if e.code in (403, 429):
+                    self.fails += 1
+                    if self.fails >= 3:
+                        raise Stop(f"{e.code} from {self.host}")
+                time.sleep(2 ** (attempt + 1))
+            except (urllib.error.URLError, TimeoutError, ConnectionError):
+                time.sleep(2 ** (attempt + 1))
+            except ValueError:  # an invalid URL (http.client.InvalidURL is one): nothing to fetch
+                return b""
+        raise Stop(f"gave up on {url}")
+
+    def download(self, url: str, dest: Path, magic: bytes = b"%PDF") -> tuple[str, int, str]:
+        """A file, resumable. Returns (state, size, sha256); state is exists, ok or bad (not a PDF, too small)."""
+        if dest.exists() and dest.stat().st_size > 0:
+            return "exists", dest.stat().st_size, ""
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        part = dest.with_name(dest.name + ".part")
+        for attempt in range(4):
+            have = part.stat().st_size if part.exists() else 0
+            self._wait()
+            try:
+                resp = self._open(url, None, {"Range": f"bytes={have}-"} if have else None)
+                if have and resp.status != 206:
+                    have = 0  # the server ignored the range: start over
+                with open(part, "ab" if have else "wb") as f:
+                    while chunk := resp.read(1 << 16):
+                        f.write(chunk)
+                    f.flush()
+                    os.fsync(f.fileno())
+                self.fails = 0
+                break
+            except urllib.error.HTTPError as e:
+                if e.code == 416:  # range past the end: the .part is already whole
+                    break
+                if e.code == 404:
+                    return "bad", 0, ""
+                if e.code in (403, 429):
+                    self.fails += 1
+                    if self.fails >= 3:
+                        raise Stop(f"{e.code} from {self.host}")
+                time.sleep(2 ** (attempt + 1))
+            except (urllib.error.URLError, TimeoutError, ConnectionError):
+                time.sleep(2 ** (attempt + 1))
+        else:
+            return "bad", 0, ""
+        size = part.stat().st_size
+        head = part.open("rb").read(len(magic))
+        if size < 1024 or head != magic:
+            part.unlink()
+            return "bad", size, ""
+        sha = hashlib.sha256()
+        with part.open("rb") as f:
+            while chunk := f.read(1 << 20):
+                sha.update(chunk)
+        os.replace(part, dest)
+        self.log.write(json.dumps({"t": now(), "url": url, "file": str(dest), "bytes": size}) + "\n")
+        return "ok", size, sha.hexdigest()()*+,;/?-._~"), ""))
         if not self.robots.can_fetch(UA, url):
             raise Stop(f"robots.txt forbids {url}")
         h = {"User-Agent": UA, **(headers or {})}
