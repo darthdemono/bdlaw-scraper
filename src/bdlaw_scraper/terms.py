@@ -390,7 +390,7 @@ def build(acts_dir: Path) -> tuple[dict[str, str], int, int]:
     @return          ({note title: markdown}, term count, definition count).
     """
     all_defs: list[Definition] = []
-    for f in sorted(acts_dir.glob("act-*.md")):
+    for f in sorted(acts_dir.rglob("act-*.md")):
         all_defs += parse_act(f.read_text(encoding="utf-8"), f.stem)
     groups = group_terms(all_defs)
     by_letter: dict[str, list[tuple[str, list[Definition]]]] = {}

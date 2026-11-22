@@ -552,7 +552,7 @@ class ActLinks:
     def __init__(self, acts_dir: Path) -> None:
         self.dir = Path(acts_dir)
         self.by_key: dict[str, set[str]] = {}
-        for f in self.dir.glob("act-*.md"):
+        for f in self.dir.rglob("act-*.md"):
             with f.open(encoding="utf-8") as fh:
                 head = [next(fh, "") for _ in range(4)]
             m = next((re.match(r'title:\s*"?(.*?)"?\s*$', l) for l in head if l.startswith("title:")), None)
