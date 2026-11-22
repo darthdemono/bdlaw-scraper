@@ -27,6 +27,7 @@ SOURCES = {
     "dppold": {"host": "www.dpp.gov.bd", "paged": "https://www.dpp.gov.bd/bgpress/index.php/document/gazettes/{t}/publication_date/{o}", "types": [1, 2], "step": 15, "follow": True, "delay": 1.5,
                "follow_re": r"/document/(get_extraordinary|get_gazette_part)/"},
     "nitimala": {"host": "laws.nitimala.com", "sitemaps": ["https://laws.nitimala.com/sitemap.xml"], "follow": False, "delay": 2.0},
+    "sayed": {"host": "laws.sayed.app", "sitemaps": ["https://laws.sayed.app/sitemap.xml"], "follow": False, "delay": 2.0},
     "nasir": {"host": "nasirlawsite.com", "seeds": ["https://nasirlawsite.com/"], "follow": True, "delay": 20.0,
               "follow_re": r"nasirlawsite\.com/.*\.(?:htm|html|php)$"},
     "pakistancode": {"host": "pakistancode.gov.pk", "follow": True, "delay": 3.0, "insecure": True,
