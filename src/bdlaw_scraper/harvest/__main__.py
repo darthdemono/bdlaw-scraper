@@ -2,10 +2,14 @@ import sys
 from pathlib import Path
 
 JOBS = {"gazette": "bdlaw_scraper.harvest.gazette", "scob": "bdlaw_scraper.harvest.scob", "courts": "bdlaw_scraper.harvest.courts"}
+MIRRORS = ("ain", "bdpil", "bdcode")
 
 if __name__ == "__main__":
-    if len(sys.argv) < 3 or sys.argv[1] not in JOBS:
-        raise SystemExit("usage: python -m bdlaw_scraper.harvest {gazette|scob|courts} ROOT_DIR")
+    if len(sys.argv) < 3 or (sys.argv[1] not in JOBS and sys.argv[1] not in MIRRORS):
+        raise SystemExit("usage: python -m bdlaw_scraper.harvest {gazette|scob|courts|ain|bdpil|bdcode} ROOT_DIR")
     import importlib
 
-    importlib.import_module(JOBS[sys.argv[1]]).run(Path(sys.argv[2]))
+    if sys.argv[1] in MIRRORS:
+        importlib.import_module("bdlaw_scraper.harvest.mirror").run_source(Path(sys.argv[2]), sys.argv[1])
+    else:
+        importlib.import_module(JOBS[sys.argv[1]]).run(Path(sys.argv[2]))
