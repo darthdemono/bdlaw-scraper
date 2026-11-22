@@ -13,6 +13,7 @@ import sqlite3
 import time
 import urllib.error
 import urllib.parse
+import ssl
 import urllib.request
 import urllib.robotparser
 from datetime import datetime, timezone
@@ -50,14 +51,16 @@ def db(path: Path) -> sqlite3.Connection:
 
 
 class Polite:
-    def __init__(self, root: Path, host: str, delay: float = 1.0):
+    def __init__(self, root: Path, host: str, delay: float = 1.0, insecure: bool = False):
         self.root, self.host, self.delay, self.last, self.fails = root, host, delay, 0.0, 0
+        # insecure: this one public, read-only host serves a broken certificate chain; the owner accepted that for it alone
+        self.ctx = ssl._create_unverified_context() if insecure else None
         (root / "cache").mkdir(parents=True, exist_ok=True)
         self.log = open(root / "requests.jsonl", "a", buffering=1)
         self.robots = urllib.robotparser.RobotFileParser()
         try:
             req = urllib.request.Request(f"https://{host}/robots.txt", headers={"User-Agent": UA})
-            body = urllib.request.urlopen(req, timeout=30).read().decode("utf-8", "ignore")
+            body = urllib.request.urlopen(req, timeout=30, context=self.ctx).read().decode("utf-8", "ignore")
             if body.lstrip().lstrip(chr(0xFEFF)).startswith("<"):
                 self.robots.parse([])  # an HTML error page is not a robots file
             else:
@@ -85,7 +88,7 @@ class Polite:
         body = urllib.parse.urlencode(data).encode() if data else None
         if body:
             h["Content-Type"] = "application/x-www-form-urlencoded"
-        return urllib.request.urlopen(urllib.request.Request(url, data=body, headers=h), timeout=60)
+        return urllib.request.urlopen(urllib.request.Request(url, data=body, headers=h), timeout=60, context=self.ctx)
 
     def fetch(self, url: str, data: dict | None = None, cache: bool = True) -> bytes:
         """A page, from the disk cache if it was ever fetched. Empty bytes for a 404.

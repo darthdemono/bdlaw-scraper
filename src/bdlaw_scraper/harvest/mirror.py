@@ -29,6 +29,9 @@ SOURCES = {
     "nitimala": {"host": "laws.nitimala.com", "sitemaps": ["https://laws.nitimala.com/sitemap.xml"], "follow": False, "delay": 2.0},
     "nasir": {"host": "nasirlawsite.com", "seeds": ["https://nasirlawsite.com/"], "follow": True, "delay": 20.0,
               "follow_re": r"nasirlawsite\.com/.*\.(?:htm|html|php)$"},
+    "pakistancode": {"host": "pakistancode.gov.pk", "follow": True, "delay": 3.0, "insecure": True,
+                     "seeds": [f"https://pakistancode.gov.pk/english/LGu0xBD?year={y}&page=1&action={a}" for y in range(1834, 1972) for a in ("inactive", "active")],
+                     "follow_re": r"pakistancode\.gov\.pk/english/(UY2Fq|LGu0xBD\?year=)"},
     "bdcode": {"host": "bdcode.gov.bd", "seeds": ["https://bdcode.gov.bd/", "https://bdcode.gov.bd/about-bangladesh-code.html",
                "https://bdcode.gov.bd/bangladesh-code-chronological-index.html", "https://bdcode.gov.bd/bangladesh-code-alphabetical-index.html"],
                "follow": True, "delay": 1.5},
@@ -111,7 +114,7 @@ def run_source(root: Path, name: str) -> None:
     con = db(root / f"{name}.db")
     con.executescript(SCHEMA)
     try:
-        http = Polite(root, cfg["host"], delay=cfg["delay"])
+        http = Polite(root, cfg["host"], delay=cfg["delay"], insecure=cfg.get("insecure", False))
         crawl(http, con, cfg, st)
         download(http, con, root, st)
         st.update("done")
