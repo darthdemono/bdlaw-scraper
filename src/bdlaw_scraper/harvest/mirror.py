@@ -144,10 +144,15 @@ def _short_path(path: str) -> str:
 
 def download(http: Polite, con, root: Path, st: Status) -> None:
     todo = con.execute("SELECT url FROM files WHERE state IN ('todo','bad') AND tries<3").fetchall()
+    todo.sort(key=lambda r: urlparse(r[0]).netloc != http.host)  # the site's own files first, foreign mirrors after
+    dead: dict[str, int] = {}  # host -> consecutive empty failures; a host that stalls is skipped for this run
     for i, (url,) in enumerate(todo):
         p = urlparse(url)
+        if dead.get(p.netloc, 0) >= 3:
+            continue
         dest = root / "pdf" / p.netloc / _short_path(re.sub(r"[^\w.\-/]+", "_", p.path.lstrip("/")))
         state, size, sha = http.download(url, dest, magic=b"%PDF" if url.lower().split("?")[0].endswith(".pdf") else None)
+        dead[p.netloc] = dead.get(p.netloc, 0) + 1 if (state == "bad" and size == 0) else 0
         con.execute("UPDATE files SET state=?, path=?, size=?, sha256=COALESCE(NULLIF(?,''),sha256), tries=tries+? WHERE url=?",
                     ("ok" if state in ("ok", "exists") else "bad", str(dest) if state != "bad" else None, size, sha, 1 if state == "bad" else 0, url))
         if i % 25 == 0:
