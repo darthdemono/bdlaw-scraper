@@ -35,3 +35,20 @@ def test_subordinate_court_list_cards_are_read():
             return b'[{"id":"1","name_en":"Barguna","name_bn":"x","login_id":"u","password":"secret"}]'
 
     assert names(Fake(), "u") == [{"id": "1", "name_en": "Barguna", "name_bn": "x"}]
+
+
+def test_wait_online_returns_when_network_comes_back(monkeypatch):
+    from bdlaw_scraper.harvest import kit
+    answers = iter([False, False, True])
+    monkeypatch.setattr(kit, "online", lambda: next(answers))
+    monkeypatch.setattr(kit.time, "sleep", lambda s: None)
+    assert kit.wait_online() is True
+
+
+def test_wait_online_gives_up_after_limit(monkeypatch):
+    from bdlaw_scraper.harvest import kit
+    monkeypatch.setattr(kit, "online", lambda: False)
+    monkeypatch.setattr(kit.time, "sleep", lambda s: None)
+    t = iter(range(0, 100000, 40))
+    monkeypatch.setattr(kit.time, "time", lambda: next(t))
+    assert kit.wait_online(limit=100) is False

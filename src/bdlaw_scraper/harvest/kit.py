@@ -9,6 +9,7 @@ PDF), and a hard stop after repeated 403 or 429 answers. Anything can be killed 
 import hashlib
 import json
 import os
+import socket
 import sqlite3
 import time
 import urllib.error
@@ -42,6 +43,24 @@ class Status:
         tmp = self.path.with_suffix(".tmp")
         tmp.write_text(json.dumps(body, indent=1))
         os.replace(tmp, self.path)
+
+
+def online() -> bool:
+    try:
+        socket.create_connection(("1.1.1.1", 443), timeout=5).close()
+        return True
+    except OSError:
+        return False
+
+
+def wait_online(limit: float = 6 * 3600) -> bool:
+    """A dropped connection is not the host's fault: wait for the network (up to limit seconds) instead of giving up."""
+    end = time.time() + limit
+    while time.time() < end:
+        if online():
+            return True
+        time.sleep(30)
+    return False
 
 
 def db(path: Path) -> sqlite3.Connection:
@@ -130,6 +149,8 @@ class Polite:
             if self.fails >= 3:
                 raise Stop(f"{blocked} from {self.host}")
             return b""
+        if not online() and wait_online():
+            return self.fetch(url, data, cache)  # the network was down, not the host
         raise Stop(f"gave up on {url}")
 
     def download(self, url: str, dest: Path, magic: bytes | None = b"%PDF") -> tuple[str, int, str]:
@@ -170,6 +191,8 @@ class Polite:
                 self.fails += 1  # this file stays refused: skip it; only three different files in a row stop the job
                 if self.fails >= 3:
                     raise Stop(f"{blocked} from {self.host}")
+            elif not online() and wait_online():
+                return self.download(url, dest, magic)  # the network was down, not the host
             return "bad", 0, ""
         size = part.stat().st_size
         head = part.open("rb").read(len(magic)) if magic else b""
