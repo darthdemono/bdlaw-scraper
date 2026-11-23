@@ -4,6 +4,7 @@ Used for ain.bd (judgment index), bdpil.org (public interest litigation cases) a
 volumes). Pages stay in the disk cache so parsing can happen later; nothing here tries to understand them.
 """
 
+import hashlib
 import re
 from pathlib import Path
 from urllib.parse import urldefrag, urljoin, urlparse
@@ -129,11 +130,23 @@ def crawl(http: Polite, con, cfg: dict, st: Status) -> None:
                       pdfs_found=con.execute("SELECT count(*) FROM files").fetchone()[0])
 
 
+def _short_path(path: str) -> str:
+    """A file name over 120 bytes (some sites put a sentence in the URL) would fail with "File name too long"."""
+    parts = []
+    for seg in path.split("/"):
+        if len(seg.encode()) > 120:
+            stem, dot, ext = seg.rpartition(".")
+            h = hashlib.sha1(seg.encode()).hexdigest()[:10]
+            seg = f"{(stem or seg)[:80]}-{h}{dot}{ext if dot else ''}"
+        parts.append(seg)
+    return "/".join(parts)
+
+
 def download(http: Polite, con, root: Path, st: Status) -> None:
     todo = con.execute("SELECT url FROM files WHERE state IN ('todo','bad') AND tries<3").fetchall()
     for i, (url,) in enumerate(todo):
         p = urlparse(url)
-        dest = root / "pdf" / p.netloc / re.sub(r"[^\w.\-/]+", "_", p.path.lstrip("/"))
+        dest = root / "pdf" / p.netloc / _short_path(re.sub(r"[^\w.\-/]+", "_", p.path.lstrip("/")))
         state, size, sha = http.download(url, dest, magic=b"%PDF" if url.lower().split("?")[0].endswith(".pdf") else None)
         con.execute("UPDATE files SET state=?, path=?, size=?, sha256=COALESCE(NULLIF(?,''),sha256), tries=tries+? WHERE url=?",
                     ("ok" if state in ("ok", "exists") else "bad", str(dest) if state != "bad" else None, size, sha, 1 if state == "bad" else 0, url))
